@@ -54,6 +54,24 @@ const char *sa_last_error(void) {
     return sa_error[0] ? sa_error : "unknown error";
 }
 
+typedef struct {
+    sa_cancel_cb cb;
+    sa_cancel_handle handle;
+} sa_cancel;
+
+static int sa_cancelled(const sa_cancel *cancel) {
+    if (cancel && cancel->cb && cancel->cb(cancel->handle)) {
+        sa_set_error("operation canceled");
+        return AVERROR_EXIT;
+    }
+    return 0;
+}
+
+static int sa_interrupt_callback(void *opaque) {
+    sa_cancel *cancel = (sa_cancel *)opaque;
+    return cancel && cancel->cb && cancel->cb(cancel->handle);
+}
+
 void sa_free(void *ptr) {
     av_free(ptr);
 }
@@ -153,7 +171,19 @@ static int sa_collect_segment_paths(const char *out_dir, const char *filename_pr
     *path_count = (int)g.gl_pathc;
     globfree(&g);
     return 0;
-#endif
+	#endif
+}
+
+static int sa_remove_segment_paths(const char *out_dir, const char *filename_prefix) {
+    char **paths = NULL;
+    int path_count = 0;
+    int ret = sa_collect_segment_paths(out_dir, filename_prefix, &paths, &path_count);
+    if (ret < 0) return ret;
+    for (int i = 0; i < path_count; i++) {
+        unlink(paths[i]);
+    }
+    sa_free_string_array(paths, path_count);
+    return 0;
 }
 
 typedef struct {
@@ -171,19 +201,34 @@ static void sa_close_input(sa_input *in) {
     in->stream = NULL;
 }
 
-static int sa_open_audio_input(const char *path, sa_input *in) {
+static int sa_open_audio_input_ctx(const char *path, sa_input *in, const sa_cancel *cancel) {
     memset(in, 0, sizeof(*in));
     in->stream_index = -1;
-    int ret = avformat_open_input(&in->fmt, path, NULL, NULL);
+    int ret = sa_cancelled(cancel);
+    if (ret < 0) return ret;
+    in->fmt = avformat_alloc_context();
+    if (!in->fmt) {
+        sa_set_error("avformat_alloc_context failed");
+        return AVERROR(ENOMEM);
+    }
+    if (cancel && cancel->cb) {
+        in->fmt->interrupt_callback.callback = sa_interrupt_callback;
+        in->fmt->interrupt_callback.opaque = (void *)cancel;
+    }
+    ret = avformat_open_input(&in->fmt, path, NULL, NULL);
     if (ret < 0) {
         sa_set_av_error("avformat_open_input", ret);
         return ret;
     }
+    ret = sa_cancelled(cancel);
+    if (ret < 0) return ret;
     ret = avformat_find_stream_info(in->fmt, NULL);
     if (ret < 0) {
         sa_set_av_error("avformat_find_stream_info", ret);
         return ret;
     }
+    ret = sa_cancelled(cancel);
+    if (ret < 0) return ret;
     ret = av_find_best_stream(in->fmt, AVMEDIA_TYPE_AUDIO, -1, -1, NULL, 0);
     if (ret < 0) {
         sa_set_av_error("av_find_best_stream(audio)", ret);
@@ -214,19 +259,24 @@ static int sa_open_audio_input(const char *path, sa_input *in) {
     return 0;
 }
 
+static int sa_open_audio_input(const char *path, sa_input *in) {
+    return sa_open_audio_input_ctx(path, in, NULL);
+}
+
 static int64_t sa_rescale_to_us(int64_t value, AVRational tb) {
     if (value == AV_NOPTS_VALUE) return AV_NOPTS_VALUE;
     return av_rescale_q(value, tb, AV_TIME_BASE_Q);
 }
 
-int sa_probe_duration(const char *path, int media_first, int64_t *duration_us) {
+int sa_probe_duration_ctx(const char *path, int media_first, int64_t *duration_us, sa_cancel_cb cancel_cb, sa_cancel_handle cancel_handle) {
     (void)media_first;
     if (!path || !duration_us) {
         sa_set_error("invalid argument");
         return AVERROR(EINVAL);
     }
+    sa_cancel cancel = {cancel_cb, cancel_handle};
     sa_input in;
-    int ret = sa_open_audio_input(path, &in);
+    int ret = sa_open_audio_input_ctx(path, &in, &cancel);
     if (ret < 0) {
         sa_close_input(&in);
         return ret;
@@ -245,6 +295,10 @@ int sa_probe_duration(const char *path, int media_first, int64_t *duration_us) {
     }
     *duration_us = duration;
     return 0;
+}
+
+int sa_probe_duration(const char *path, int media_first, int64_t *duration_us) {
+    return sa_probe_duration_ctx(path, media_first, duration_us, NULL, 0);
 }
 
 static void sa_describe_input_channel_layout(const AVCodecContext *dec, char *buf, size_t size) {
@@ -334,9 +388,9 @@ static int sa_init_filter(sa_filter *f, AVCodecContext *dec, const char *desc) {
 
 typedef int (*sa_frame_cb)(AVFrame *frame, void *opaque);
 
-static int sa_decode_filter_run(const char *path, const char *filter_desc, sa_frame_cb cb, void *opaque) {
+static int sa_decode_filter_run_ctx(const char *path, const char *filter_desc, sa_frame_cb cb, void *opaque, const sa_cancel *cancel) {
     sa_input in;
-    int ret = sa_open_audio_input(path, &in);
+    int ret = sa_open_audio_input_ctx(path, &in, cancel);
     if (ret < 0) {
         sa_close_input(&in);
         return ret;
@@ -357,6 +411,8 @@ static int sa_decode_filter_run(const char *path, const char *filter_desc, sa_fr
         goto done;
     }
     while ((ret = av_read_frame(in.fmt, pkt)) >= 0) {
+        ret = sa_cancelled(cancel);
+        if (ret < 0) goto done;
         if (pkt->stream_index != in.stream_index) {
             av_packet_unref(pkt);
             continue;
@@ -368,6 +424,8 @@ static int sa_decode_filter_run(const char *path, const char *filter_desc, sa_fr
             goto done;
         }
         while ((ret = avcodec_receive_frame(in.dec, frame)) >= 0) {
+            ret = sa_cancelled(cancel);
+            if (ret < 0) goto done;
             ret = av_buffersrc_add_frame_flags(filter.src, frame, AV_BUFFERSRC_FLAG_KEEP_REF);
             av_frame_unref(frame);
             if (ret == AVERROR_EOF) {
@@ -379,6 +437,8 @@ static int sa_decode_filter_run(const char *path, const char *filter_desc, sa_fr
                 goto done;
             }
             while ((ret = av_buffersink_get_frame(filter.sink, filt)) >= 0) {
+                ret = sa_cancelled(cancel);
+                if (ret < 0) goto done;
                 if (cb) {
                     int cbret = cb(filt, opaque);
                     av_frame_unref(filt);
@@ -413,6 +473,8 @@ static int sa_decode_filter_run(const char *path, const char *filter_desc, sa_fr
         goto done;
     }
     while ((ret = avcodec_receive_frame(in.dec, frame)) >= 0) {
+        ret = sa_cancelled(cancel);
+        if (ret < 0) goto done;
         ret = av_buffersrc_add_frame_flags(filter.src, frame, AV_BUFFERSRC_FLAG_KEEP_REF);
         av_frame_unref(frame);
         if (ret == AVERROR_EOF) {
@@ -432,6 +494,8 @@ drain_filter:
         goto done;
     }
     while ((ret = av_buffersink_get_frame(filter.sink, filt)) >= 0) {
+        ret = sa_cancelled(cancel);
+        if (ret < 0) goto done;
         if (cb) {
             int cbret = cb(filt, opaque);
             av_frame_unref(filt);
@@ -453,6 +517,10 @@ done:
     sa_free_filter(&filter);
     sa_close_input(&in);
     return ret;
+}
+
+static int sa_decode_filter_run(const char *path, const char *filter_desc, sa_frame_cb cb, void *opaque) {
+    return sa_decode_filter_run_ctx(path, filter_desc, cb, opaque, NULL);
 }
 
 typedef struct {
@@ -568,18 +636,19 @@ static void sa_silence_log_callback(void *ptr, int level, const char *fmt, va_li
     }
 }
 
-int sa_volume_detect(const char *path, double *mean_db, double *max_db) {
+int sa_volume_detect_ctx(const char *path, double *mean_db, double *max_db, sa_cancel_cb cancel_cb, sa_cancel_handle cancel_handle) {
     if (!path || !mean_db || !max_db) {
         sa_set_error("invalid argument");
         return AVERROR(EINVAL);
     }
+    sa_cancel cancel = {cancel_cb, cancel_handle};
     sa_volume_capture cap = {0};
     sa_log_lock();
     int old_level = av_log_get_level();
     av_log_set_level(AV_LOG_INFO);
     sa_current_volume = &cap;
     av_log_set_callback(sa_volume_log_callback);
-    int ret = sa_decode_filter_run(path, "volumedetect", NULL, NULL);
+    int ret = sa_decode_filter_run_ctx(path, "volumedetect", NULL, NULL, &cancel);
     av_log_set_callback(av_log_default_callback);
     av_log_set_level(old_level);
     sa_current_volume = NULL;
@@ -592,6 +661,10 @@ int sa_volume_detect(const char *path, double *mean_db, double *max_db) {
     *mean_db = cap.has_mean ? cap.mean_db : NAN;
     *max_db = cap.has_max ? cap.max_db : NAN;
     return 0;
+}
+
+int sa_volume_detect(const char *path, double *mean_db, double *max_db) {
+    return sa_volume_detect_ctx(path, mean_db, max_db, NULL, 0);
 }
 
 static int sa_silence_frame_cb(AVFrame *frame, void *opaque) {
@@ -615,7 +688,7 @@ static int sa_silence_frame_cb(AVFrame *frame, void *opaque) {
     return 0;
 }
 
-int sa_silence_detect(const char *path, double noise_db, int64_t min_silence_us, sa_interval **intervals, int *interval_count) {
+int sa_silence_detect_ctx(const char *path, double noise_db, int64_t min_silence_us, sa_interval **intervals, int *interval_count, sa_cancel_cb cancel_cb, sa_cancel_handle cancel_handle) {
     if (!path || !intervals || !interval_count) {
         sa_set_error("invalid argument");
         return AVERROR(EINVAL);
@@ -625,13 +698,14 @@ int sa_silence_detect(const char *path, double noise_db, int64_t min_silence_us,
     if (min_silence_us < 1000) min_silence_us = 1000;
     char filter[256];
     snprintf(filter, sizeof(filter), "silencedetect=noise=%gdB:d=%.6f", noise_db, (double)min_silence_us / 1000000.0);
+    sa_cancel cancel = {cancel_cb, cancel_handle};
     sa_silence_capture cap = {0};
     sa_log_lock();
     int old_level = av_log_get_level();
     av_log_set_level(AV_LOG_INFO);
     sa_current_silence = &cap;
     av_log_set_callback(sa_silence_log_callback);
-    int ret = sa_decode_filter_run(path, filter, NULL, NULL);
+    int ret = sa_decode_filter_run_ctx(path, filter, NULL, NULL, &cancel);
     av_log_set_callback(av_log_default_callback);
     av_log_set_level(old_level);
     sa_current_silence = NULL;
@@ -644,6 +718,10 @@ int sa_silence_detect(const char *path, double noise_db, int64_t min_silence_us,
     *intervals = cap.items;
     *interval_count = cap.count;
     return 0;
+}
+
+int sa_silence_detect(const char *path, double noise_db, int64_t min_silence_us, sa_interval **intervals, int *interval_count) {
+    return sa_silence_detect_ctx(path, noise_db, min_silence_us, intervals, interval_count, NULL, 0);
 }
 
 static int sa_parse_bitrate(const char *bitrate) {
@@ -725,8 +803,10 @@ static int sa_open_audio_output(const char *out_path, const char *format_name, e
     return 0;
 }
 
-static int sa_encode_frame(sa_output *out, AVFrame *frame) {
+static int sa_encode_frame_ctx(sa_output *out, AVFrame *frame, const sa_cancel *cancel) {
     int ret;
+    ret = sa_cancelled(cancel);
+    if (ret < 0) return ret;
     if (frame) {
         frame->pts = out->next_pts;
         out->next_pts += frame->nb_samples;
@@ -739,6 +819,11 @@ static int sa_encode_frame(sa_output *out, AVFrame *frame) {
     AVPacket *pkt = av_packet_alloc();
     if (!pkt) return AVERROR(ENOMEM);
     while ((ret = avcodec_receive_packet(out->enc, pkt)) >= 0) {
+        ret = sa_cancelled(cancel);
+        if (ret < 0) {
+            av_packet_free(&pkt);
+            return ret;
+        }
         av_packet_rescale_ts(pkt, out->enc->time_base, out->stream->time_base);
         pkt->stream_index = out->stream->index;
         ret = av_interleaved_write_frame(out->fmt, pkt);
@@ -755,13 +840,18 @@ static int sa_encode_frame(sa_output *out, AVFrame *frame) {
     return ret;
 }
 
+static int sa_encode_frame(sa_output *out, AVFrame *frame) {
+    return sa_encode_frame_ctx(out, frame, NULL);
+}
+
 typedef struct {
     sa_output *out;
+    const sa_cancel *cancel;
 } sa_write_ctx;
 
 static int sa_write_frame_cb(AVFrame *frame, void *opaque) {
     sa_write_ctx *ctx = (sa_write_ctx *)opaque;
-    return sa_encode_frame(ctx->out, frame);
+    return sa_encode_frame_ctx(ctx->out, frame, ctx->cancel);
 }
 
 static const char *sa_sample_fmt_name(enum AVSampleFormat fmt) {
@@ -769,9 +859,11 @@ static const char *sa_sample_fmt_name(enum AVSampleFormat fmt) {
     return name ? name : "s16";
 }
 
-static int sa_render_filter_to_output(const char *input_path, const char *out_path, const char *format_name, enum AVCodecID codec_id, int sample_rate, int bit_rate, const char *filter_head) {
+static int sa_render_filter_to_output_ctx(const char *input_path, const char *out_path, const char *format_name, enum AVCodecID codec_id, int sample_rate, int bit_rate, const char *filter_head, const sa_cancel *cancel) {
+    int ret = sa_cancelled(cancel);
+    if (ret < 0) return ret;
     sa_output out;
-    int ret = sa_open_audio_output(out_path, format_name, codec_id, sample_rate, bit_rate, NULL, &out);
+    ret = sa_open_audio_output(out_path, format_name, codec_id, sample_rate, bit_rate, NULL, &out);
     if (ret < 0) {
         sa_close_output(&out);
         return ret;
@@ -783,9 +875,9 @@ static int sa_render_filter_to_output(const char *input_path, const char *out_pa
     } else {
         snprintf(filter, sizeof(filter), "aformat=sample_fmts=%s:channel_layouts=mono,aresample=%d", fmt_name, out.enc->sample_rate);
     }
-    sa_write_ctx wctx = {.out = &out};
-    ret = sa_decode_filter_run(input_path, filter, sa_write_frame_cb, &wctx);
-    if (ret >= 0) ret = sa_encode_frame(&out, NULL);
+    sa_write_ctx wctx = {.out = &out, .cancel = cancel};
+    ret = sa_decode_filter_run_ctx(input_path, filter, sa_write_frame_cb, &wctx, cancel);
+    if (ret >= 0) ret = sa_encode_frame_ctx(&out, NULL, cancel);
     if (ret >= 0) {
         ret = av_write_trailer(out.fmt);
         if (ret < 0) sa_set_av_error("av_write_trailer", ret);
@@ -794,11 +886,20 @@ static int sa_render_filter_to_output(const char *input_path, const char *out_pa
     return ret;
 }
 
-int sa_transcode_wav(const char *input_path, const char *out_path, int sample_rate) {
-    return sa_render_filter_to_output(input_path, out_path, "wav", AV_CODEC_ID_PCM_S16LE, sample_rate > 0 ? sample_rate : 16000, 0, NULL);
+static int sa_render_filter_to_output(const char *input_path, const char *out_path, const char *format_name, enum AVCodecID codec_id, int sample_rate, int bit_rate, const char *filter_head) {
+    return sa_render_filter_to_output_ctx(input_path, out_path, format_name, codec_id, sample_rate, bit_rate, filter_head, NULL);
 }
 
-int sa_export_wav(const char *input_path, const char *out_path, int64_t start_us, int64_t end_us, int sample_rate) {
+int sa_transcode_wav_ctx(const char *input_path, const char *out_path, int sample_rate, sa_cancel_cb cancel_cb, sa_cancel_handle cancel_handle) {
+    sa_cancel cancel = {cancel_cb, cancel_handle};
+    return sa_render_filter_to_output_ctx(input_path, out_path, "wav", AV_CODEC_ID_PCM_S16LE, sample_rate > 0 ? sample_rate : 16000, 0, NULL, &cancel);
+}
+
+int sa_transcode_wav(const char *input_path, const char *out_path, int sample_rate) {
+    return sa_transcode_wav_ctx(input_path, out_path, sample_rate, NULL, 0);
+}
+
+int sa_export_wav_ctx(const char *input_path, const char *out_path, int64_t start_us, int64_t end_us, int sample_rate, sa_cancel_cb cancel_cb, sa_cancel_handle cancel_handle) {
     if (end_us <= start_us) {
         sa_set_error("invalid export interval");
         return AVERROR(EINVAL);
@@ -806,21 +907,27 @@ int sa_export_wav(const char *input_path, const char *out_path, int64_t start_us
     char filter[256];
     snprintf(filter, sizeof(filter), "atrim=start=%.6f:end=%.6f,asetpts=PTS-STARTPTS",
              (double)start_us / 1000000.0, (double)end_us / 1000000.0);
-    return sa_render_filter_to_output(input_path, out_path, "wav", AV_CODEC_ID_PCM_S16LE, sample_rate > 0 ? sample_rate : 16000, 0, filter);
+    sa_cancel cancel = {cancel_cb, cancel_handle};
+    return sa_render_filter_to_output_ctx(input_path, out_path, "wav", AV_CODEC_ID_PCM_S16LE, sample_rate > 0 ? sample_rate : 16000, 0, filter, &cancel);
 }
 
-int sa_render_intervals_wav(const char *input_path, const char *out_path, const sa_interval *intervals, int interval_count, int sample_rate) {
+int sa_export_wav(const char *input_path, const char *out_path, int64_t start_us, int64_t end_us, int sample_rate) {
+    return sa_export_wav_ctx(input_path, out_path, start_us, end_us, sample_rate, NULL, 0);
+}
+
+int sa_render_intervals_wav_ctx(const char *input_path, const char *out_path, const sa_interval *intervals, int interval_count, int sample_rate, sa_cancel_cb cancel_cb, sa_cancel_handle cancel_handle) {
     if (!intervals || interval_count <= 0) {
         sa_set_error("interval list is empty");
         return AVERROR(EINVAL);
     }
+    sa_cancel cancel = {cancel_cb, cancel_handle};
     char filter[8192];
     size_t used = 0;
     if (interval_count == 1) {
         snprintf(filter, sizeof(filter), "atrim=start=%.6f:end=%.6f,asetpts=PTS-STARTPTS",
                  (double)intervals[0].start_us / 1000000.0,
                  (double)intervals[0].end_us / 1000000.0);
-        return sa_render_filter_to_output(input_path, out_path, "wav", AV_CODEC_ID_PCM_S16LE, sample_rate > 0 ? sample_rate : 16000, 0, filter);
+        return sa_render_filter_to_output_ctx(input_path, out_path, "wav", AV_CODEC_ID_PCM_S16LE, sample_rate > 0 ? sample_rate : 16000, 0, filter, &cancel);
     }
     int n = snprintf(filter + used, sizeof(filter) - used, "asplit=%d", interval_count);
     if (n < 0 || (size_t)n >= sizeof(filter) - used) {
@@ -866,20 +973,34 @@ int sa_render_intervals_wav(const char *input_path, const char *out_path, const 
         sa_set_error("filter graph too large");
         return AVERROR(ENOMEM);
     }
-    return sa_render_filter_to_output(input_path, out_path, "wav", AV_CODEC_ID_PCM_S16LE, sample_rate > 0 ? sample_rate : 16000, 0, filter);
+    return sa_render_filter_to_output_ctx(input_path, out_path, "wav", AV_CODEC_ID_PCM_S16LE, sample_rate > 0 ? sample_rate : 16000, 0, filter, &cancel);
+}
+
+int sa_render_intervals_wav(const char *input_path, const char *out_path, const sa_interval *intervals, int interval_count, int sample_rate) {
+    return sa_render_intervals_wav_ctx(input_path, out_path, intervals, interval_count, sample_rate, NULL, 0);
+}
+
+int sa_encode_opus_ctx(const char *wav_path, const char *ogg_path, int sample_rate, const char *bitrate, sa_cancel_cb cancel_cb, sa_cancel_handle cancel_handle) {
+    sa_cancel cancel = {cancel_cb, cancel_handle};
+    return sa_render_filter_to_output_ctx(wav_path, ogg_path, "ogg", AV_CODEC_ID_OPUS, sample_rate > 0 ? sample_rate : 16000, sa_parse_bitrate(bitrate), NULL, &cancel);
 }
 
 int sa_encode_opus(const char *wav_path, const char *ogg_path, int sample_rate, const char *bitrate) {
-    return sa_render_filter_to_output(wav_path, ogg_path, "ogg", AV_CODEC_ID_OPUS, sample_rate > 0 ? sample_rate : 16000, sa_parse_bitrate(bitrate), NULL);
+    return sa_encode_opus_ctx(wav_path, ogg_path, sample_rate, bitrate, NULL, 0);
 }
 
-int sa_split_wav_fixed(const char *wav_path, const char *out_dir, const char *filename_prefix, int64_t slice_us, int sample_rate, char ***paths, int *path_count) {
+int sa_split_wav_fixed_ctx(const char *wav_path, const char *out_dir, const char *filename_prefix, int64_t slice_us, int sample_rate, char ***paths, int *path_count, sa_cancel_cb cancel_cb, sa_cancel_handle cancel_handle) {
     if (!wav_path || !out_dir || !filename_prefix || !paths || !path_count) {
         sa_set_error("invalid argument");
         return AVERROR(EINVAL);
     }
     *paths = NULL;
     *path_count = 0;
+    sa_cancel cancel = {cancel_cb, cancel_handle};
+    int ret = sa_cancelled(&cancel);
+    if (ret < 0) return ret;
+    ret = sa_remove_segment_paths(out_dir, filename_prefix);
+    if (ret < 0) return ret;
     if (slice_us <= 0) slice_us = 5000000;
     char pattern[4096];
     snprintf(pattern, sizeof(pattern), "%s/%s%%04d.wav", out_dir, filename_prefix);
@@ -890,18 +1011,18 @@ int sa_split_wav_fixed(const char *wav_path, const char *out_dir, const char *fi
     av_dict_set(&opts, "segment_time", segment_time, 0);
     av_dict_set(&opts, "segment_format", "wav", 0);
     av_dict_set(&opts, "reset_timestamps", "1", 0);
-    int ret = sa_open_audio_output(pattern, "segment", AV_CODEC_ID_PCM_S16LE, sample_rate > 0 ? sample_rate : 16000, 0, &opts, &out);
+    ret = sa_open_audio_output(pattern, "segment", AV_CODEC_ID_PCM_S16LE, sample_rate > 0 ? sample_rate : 16000, 0, &opts, &out);
     av_dict_free(&opts);
     if (ret < 0) {
         sa_close_output(&out);
         return ret;
     }
-    sa_write_ctx wctx = {.out = &out};
+    sa_write_ctx wctx = {.out = &out, .cancel = &cancel};
     char filter[256];
     snprintf(filter, sizeof(filter), "aformat=sample_fmts=%s:channel_layouts=mono,aresample=%d",
              sa_sample_fmt_name(out.enc->sample_fmt), out.enc->sample_rate);
-    ret = sa_decode_filter_run(wav_path, filter, sa_write_frame_cb, &wctx);
-    if (ret >= 0) ret = sa_encode_frame(&out, NULL);
+    ret = sa_decode_filter_run_ctx(wav_path, filter, sa_write_frame_cb, &wctx, &cancel);
+    if (ret >= 0) ret = sa_encode_frame_ctx(&out, NULL, &cancel);
     if (ret >= 0) ret = av_write_trailer(out.fmt);
     sa_close_output(&out);
     if (ret < 0) {
@@ -911,7 +1032,11 @@ int sa_split_wav_fixed(const char *wav_path, const char *out_dir, const char *fi
     return sa_collect_segment_paths(out_dir, filename_prefix, paths, path_count);
 }
 
-static int sa_concat_wav_copy(const char **paths, int path_count, const char *out_path) {
+int sa_split_wav_fixed(const char *wav_path, const char *out_dir, const char *filename_prefix, int64_t slice_us, int sample_rate, char ***paths, int *path_count) {
+    return sa_split_wav_fixed_ctx(wav_path, out_dir, filename_prefix, slice_us, sample_rate, paths, path_count, NULL, 0);
+}
+
+static int sa_concat_wav_copy_ctx(const char **paths, int path_count, const char *out_path, const sa_cancel *cancel) {
     char list_path[4096];
     snprintf(list_path, sizeof(list_path), "%s.concat_list.txt", out_path);
     FILE *list = fopen(list_path, "w");
@@ -933,6 +1058,18 @@ static int sa_concat_wav_copy(const char **paths, int path_count, const char *ou
     AVDictionary *opts = NULL;
     av_dict_set(&opts, "safe", "0", 0);
     const AVInputFormat *concat_fmt = av_find_input_format("concat");
+    ifmt = avformat_alloc_context();
+    if (!ifmt) {
+        ret = AVERROR(ENOMEM);
+        sa_set_error("avformat_alloc_context(concat) failed");
+        goto done;
+    }
+    if (cancel && cancel->cb) {
+        ifmt->interrupt_callback.callback = sa_interrupt_callback;
+        ifmt->interrupt_callback.opaque = (void *)cancel;
+    }
+    ret = sa_cancelled(cancel);
+    if (ret < 0) goto done;
     ret = avformat_open_input(&ifmt, list_path, concat_fmt, &opts);
     av_dict_free(&opts);
     if (ret < 0) {
@@ -993,6 +1130,8 @@ static int sa_concat_wav_copy(const char **paths, int path_count, const char *ou
         goto done;
     }
     while ((ret = av_read_frame(ifmt, pkt)) >= 0) {
+        ret = sa_cancelled(cancel);
+        if (ret < 0) goto done;
         if (pkt->stream_index != audio_in) {
             av_packet_unref(pkt);
             continue;
@@ -1018,6 +1157,7 @@ static int sa_concat_wav_copy(const char **paths, int path_count, const char *ou
     }
 
 done:
+    av_dict_free(&opts);
     av_packet_free(&pkt);
     if (ofmt) {
         if (!(ofmt->oformat->flags & AVFMT_NOFILE) && ofmt->pb) avio_closep(&ofmt->pb);
@@ -1028,10 +1168,10 @@ done:
     return ret;
 }
 
-static int sa_concat_wav_reencode(const char **paths, int path_count, const char *out_path) {
+static int sa_concat_wav_reencode_ctx(const char **paths, int path_count, const char *out_path, const sa_cancel *cancel) {
     int sample_rate = 16000;
     sa_input first;
-    if (sa_open_audio_input(paths[0], &first) >= 0) {
+    if (sa_open_audio_input_ctx(paths[0], &first, cancel) >= 0) {
         if (first.dec && first.dec->sample_rate > 0) sample_rate = first.dec->sample_rate;
         sa_close_input(&first);
     }
@@ -1042,14 +1182,19 @@ static int sa_concat_wav_reencode(const char **paths, int path_count, const char
         return ret;
     }
     for (int i = 0; i < path_count; i++) {
-        sa_write_ctx wctx = {.out = &out};
+        int cancel_ret = sa_cancelled(cancel);
+        if (cancel_ret < 0) {
+            ret = cancel_ret;
+            break;
+        }
+        sa_write_ctx wctx = {.out = &out, .cancel = cancel};
         char filter[256];
         snprintf(filter, sizeof(filter), "aformat=sample_fmts=%s:channel_layouts=mono,aresample=%d",
                  sa_sample_fmt_name(out.enc->sample_fmt), out.enc->sample_rate);
-        ret = sa_decode_filter_run(paths[i], filter, sa_write_frame_cb, &wctx);
+        ret = sa_decode_filter_run_ctx(paths[i], filter, sa_write_frame_cb, &wctx, cancel);
         if (ret < 0) break;
     }
-    if (ret >= 0) ret = sa_encode_frame(&out, NULL);
+    if (ret >= 0) ret = sa_encode_frame_ctx(&out, NULL, cancel);
     if (ret >= 0) {
         ret = av_write_trailer(out.fmt);
         if (ret < 0) sa_set_av_error("av_write_trailer(concat)", ret);
@@ -1058,13 +1203,18 @@ static int sa_concat_wav_reencode(const char **paths, int path_count, const char
     return ret;
 }
 
-int sa_concat_wav(const char **paths, int path_count, const char *out_path) {
+int sa_concat_wav_ctx(const char **paths, int path_count, const char *out_path, sa_cancel_cb cancel_cb, sa_cancel_handle cancel_handle) {
     if (!paths || path_count <= 0 || !out_path) {
         sa_set_error("empty concat input");
         return AVERROR(EINVAL);
     }
-    int ret = sa_concat_wav_copy(paths, path_count, out_path);
+    sa_cancel cancel = {cancel_cb, cancel_handle};
+    int ret = sa_concat_wav_copy_ctx(paths, path_count, out_path, &cancel);
     if (ret == 0) return 0;
     sa_error[0] = '\0';
-    return sa_concat_wav_reencode(paths, path_count, out_path);
+    return sa_concat_wav_reencode_ctx(paths, path_count, out_path, &cancel);
+}
+
+int sa_concat_wav(const char **paths, int path_count, const char *out_path) {
+    return sa_concat_wav_ctx(paths, path_count, out_path, NULL, 0);
 }

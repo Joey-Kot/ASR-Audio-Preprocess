@@ -23,7 +23,10 @@ import (
 type fakeBackend struct {
 	duration       time.Duration
 	splitCalled    bool
+	splitOutDir    string
 	splitPaths     []string
+	useSilences    bool
+	silences       []Interval
 	exportFailures map[string]bool
 	renderFailures map[string]bool
 	concatInputs   []string
@@ -38,6 +41,9 @@ func (f *fakeBackend) VolumeDetect(ctx context.Context, path string) (VolumeStat
 }
 
 func (f *fakeBackend) SilenceDetect(ctx context.Context, path string, noiseDB float64, minSilence time.Duration) ([]Interval, error) {
+	if f.useSilences {
+		return append([]Interval(nil), f.silences...), nil
+	}
 	return []Interval{{Start: 1 * time.Second, End: 2 * time.Second}}, nil
 }
 
@@ -47,6 +53,7 @@ func (f *fakeBackend) TranscodeToWAV(ctx context.Context, inputPath, wavPath str
 
 func (f *fakeBackend) SplitWAVFixed(ctx context.Context, wavPath, outDir, filenamePrefix string, sliceLength time.Duration, sampleRate int) ([]string, error) {
 	f.splitCalled = true
+	f.splitOutDir = outDir
 	if len(f.splitPaths) > 0 {
 		return f.splitPaths, nil
 	}
@@ -121,11 +128,94 @@ func TestRemoveSilenceByFixedSlicesUsesBackendSegmentAndSkipsFailedSlices(t *tes
 	if len(backend.concatInputs) != 2 {
 		t.Fatalf("concat inputs=%#v want 2 successful slices", backend.concatInputs)
 	}
+	if len(info.OutputFiles) != 1 || info.OutputFiles[0] != "/tmp/out.wav" {
+		t.Fatalf("output files=%#v want final merged output", info.OutputFiles)
+	}
 	if !strings.Contains(backend.concatInputs[0], "slice_trim0001.wav") {
 		t.Fatalf("first concat input=%q", backend.concatInputs[0])
 	}
 	if !strings.Contains(backend.concatInputs[1], "slice_trim0003.wav") {
 		t.Fatalf("second concat input=%q", backend.concatInputs[1])
+	}
+}
+
+func TestTrimLongSilencesFromWAVReturnsNoOutputForFullSilence(t *testing.T) {
+	backend := &fakeBackend{
+		duration:    5 * time.Second,
+		useSilences: true,
+		silences:    []Interval{{Start: 0, End: 5 * time.Second}},
+	}
+	p, err := NewProcessor(WithBackend(backend))
+	if err != nil {
+		t.Fatal(err)
+	}
+	out, info, err := p.TrimLongSilencesFromWAV(context.Background(), "/tmp/input.wav", "/tmp/out.wav")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if out != "" {
+		t.Fatalf("out=%q want no output for full silence", out)
+	}
+	if info.EffectiveDuration != 0 || info.OutputDuration != 0 {
+		t.Fatalf("effective=%s output=%s want zero durations", info.EffectiveDuration, info.OutputDuration)
+	}
+	if info.DetectedSilenceCount != 1 || info.DetectedSpeechIntervalCount != 0 {
+		t.Fatalf("silence count=%d speech intervals=%d", info.DetectedSilenceCount, info.DetectedSpeechIntervalCount)
+	}
+}
+
+func TestRemoveSilenceByFixedSlicesReturnsNoOutputWhenAllSlicesAreSilent(t *testing.T) {
+	backend := &fakeBackend{
+		duration:    5 * time.Second,
+		useSilences: true,
+		silences:    []Interval{{Start: 0, End: 5 * time.Second}},
+	}
+	cfg := DefaultConfig()
+	cfg.FixedTrim.Workers = 2
+	cfg.FixedTrim.TempDir = t.TempDir()
+	p, err := NewProcessor(WithBackend(backend), WithConfig(cfg))
+	if err != nil {
+		t.Fatal(err)
+	}
+	out, info, err := p.RemoveSilenceByFixedSlicesAndMerge(context.Background(), "/tmp/input.wav", "/tmp/out.wav")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if out != "" {
+		t.Fatalf("out=%q want no output when all fixed slices are silent", out)
+	}
+	if len(backend.concatInputs) != 0 {
+		t.Fatalf("concat inputs=%#v want none", backend.concatInputs)
+	}
+	if info.FixedSliceSucceeded != 0 || info.FixedSliceSkipped != 3 {
+		t.Fatalf("fixed succeeded=%d skipped=%d", info.FixedSliceSucceeded, info.FixedSliceSkipped)
+	}
+	if info.DetectedSilenceCount != 3 || info.DetectedSpeechIntervalCount != 0 {
+		t.Fatalf("silence count=%d speech intervals=%d", info.DetectedSilenceCount, info.DetectedSpeechIntervalCount)
+	}
+	if info.EffectiveDuration != 0 || info.OutputDuration != 0 {
+		t.Fatalf("effective=%s output=%s want zero durations", info.EffectiveDuration, info.OutputDuration)
+	}
+}
+
+func TestRemoveSilenceByFixedSlicesUsesUniqueRunDirectory(t *testing.T) {
+	backend := &fakeBackend{duration: 5 * time.Second}
+	tempDir := t.TempDir()
+	cfg := DefaultConfig()
+	cfg.FixedTrim.TempDir = tempDir
+	p, err := NewProcessor(WithBackend(backend), WithConfig(cfg))
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, _, err = p.RemoveSilenceByFixedSlicesAndMerge(context.Background(), "/tmp/input.wav", "/tmp/out.wav")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if backend.splitOutDir == filepath.Join(tempDir, "slices") {
+		t.Fatalf("split out dir=%q reuses shared temp directory", backend.splitOutDir)
+	}
+	if filepath.Dir(filepath.Dir(backend.splitOutDir)) != tempDir {
+		t.Fatalf("split out dir=%q is not under configured temp dir %q", backend.splitOutDir, tempDir)
 	}
 }
 

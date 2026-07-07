@@ -15,6 +15,8 @@ package smartaudio
 
 /*
 #cgo pkg-config: libavformat libavcodec libavfilter libswresample libavutil
+#include <stdint.h>
+extern int smartaudio_context_canceled(uintptr_t handle);
 #include "internal/libavshim/smartaudio_libav.h"
 #include "internal/libavshim/smartaudio_libav.c"
 */
@@ -23,6 +25,7 @@ import "C"
 import (
 	"context"
 	"fmt"
+	"runtime/cgo"
 	"time"
 	"unsafe"
 )
@@ -37,49 +40,90 @@ func NewLibavBackend() Backend {
 	return LibavBackend{}
 }
 
+func libavCancel(ctx context.Context) (C.sa_cancel_cb, C.sa_cancel_handle, func()) {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	handle := cgo.NewHandle(ctx)
+	return (C.sa_cancel_cb)(C.smartaudio_context_canceled), C.sa_cancel_handle(uintptr(handle)), func() {
+		handle.Delete()
+	}
+}
+
+func contextErr(ctx context.Context) error {
+	if ctx == nil {
+		return nil
+	}
+	return ctx.Err()
+}
+
 func (LibavBackend) ProbeDuration(ctx context.Context, path string, order ProbeOrder) (time.Duration, error) {
-	if err := ctx.Err(); err != nil {
+	if err := contextErr(ctx); err != nil {
 		return 0, err
 	}
 	cPath := C.CString(path)
 	defer C.free(unsafe.Pointer(cPath))
+	cancelCB, cancelHandle, releaseCancel := libavCancel(ctx)
+	defer releaseCancel()
 	var out C.int64_t
 	mediaFirst := C.int(1)
 	if order == ProbeWAVFirst {
 		mediaFirst = 0
 	}
-	if rc := C.sa_probe_duration(cPath, mediaFirst, &out); rc != 0 {
+	if rc := C.sa_probe_duration_ctx(cPath, mediaFirst, &out, cancelCB, cancelHandle); rc != 0 {
+		if err := contextErr(ctx); err != nil {
+			return 0, err
+		}
 		return 0, libavError("probe duration")
+	}
+	if err := contextErr(ctx); err != nil {
+		return 0, err
 	}
 	return time.Duration(out) * time.Microsecond, nil
 }
 
 func (LibavBackend) VolumeDetect(ctx context.Context, path string) (VolumeStats, error) {
-	if err := ctx.Err(); err != nil {
+	if err := contextErr(ctx); err != nil {
 		return VolumeStats{}, err
 	}
 	cPath := C.CString(path)
 	defer C.free(unsafe.Pointer(cPath))
+	cancelCB, cancelHandle, releaseCancel := libavCancel(ctx)
+	defer releaseCancel()
 	var mean C.double
 	var max C.double
-	if rc := C.sa_volume_detect(cPath, &mean, &max); rc != 0 {
+	if rc := C.sa_volume_detect_ctx(cPath, &mean, &max, cancelCB, cancelHandle); rc != 0 {
+		if err := contextErr(ctx); err != nil {
+			return VolumeStats{}, err
+		}
 		return VolumeStats{}, libavError("volumedetect")
+	}
+	if err := contextErr(ctx); err != nil {
+		return VolumeStats{}, err
 	}
 	return VolumeStats{MeanDB: float64(mean), MaxDB: float64(max), HasMean: true, HasMax: true, Valid: true}, nil
 }
 
 func (LibavBackend) SilenceDetect(ctx context.Context, path string, noiseDB float64, minSilence time.Duration) ([]Interval, error) {
-	if err := ctx.Err(); err != nil {
+	if err := contextErr(ctx); err != nil {
 		return nil, err
 	}
 	cPath := C.CString(path)
 	defer C.free(unsafe.Pointer(cPath))
+	cancelCB, cancelHandle, releaseCancel := libavCancel(ctx)
+	defer releaseCancel()
 	var cIntervals *C.sa_interval
 	var cCount C.int
-	if rc := C.sa_silence_detect(cPath, C.double(noiseDB), C.int64_t(minSilence/time.Microsecond), &cIntervals, &cCount); rc != 0 {
+	if rc := C.sa_silence_detect_ctx(cPath, C.double(noiseDB), C.int64_t(minSilence/time.Microsecond), &cIntervals, &cCount, cancelCB, cancelHandle); rc != 0 {
+		if err := contextErr(ctx); err != nil {
+			return nil, err
+		}
 		return nil, libavError("silencedetect")
 	}
 	defer C.sa_free(unsafe.Pointer(cIntervals))
+	if err := contextErr(ctx); err != nil {
+		return nil, err
+	}
 	count := int(cCount)
 	if count == 0 {
 		return nil, nil
@@ -96,30 +140,44 @@ func (LibavBackend) SilenceDetect(ctx context.Context, path string, noiseDB floa
 }
 
 func (LibavBackend) TranscodeToWAV(ctx context.Context, inputPath, wavPath string, sampleRate int) error {
-	if err := ctx.Err(); err != nil {
+	if err := contextErr(ctx); err != nil {
 		return err
 	}
 	cInput, cOut := C.CString(inputPath), C.CString(wavPath)
 	defer C.free(unsafe.Pointer(cInput))
 	defer C.free(unsafe.Pointer(cOut))
-	if rc := C.sa_transcode_wav(cInput, cOut, C.int(sampleRate)); rc != 0 {
+	cancelCB, cancelHandle, releaseCancel := libavCancel(ctx)
+	defer releaseCancel()
+	if rc := C.sa_transcode_wav_ctx(cInput, cOut, C.int(sampleRate), cancelCB, cancelHandle); rc != 0 {
+		if err := contextErr(ctx); err != nil {
+			return err
+		}
 		return libavError("transcode wav")
 	}
-	return nil
+	return contextErr(ctx)
 }
 
 func (LibavBackend) SplitWAVFixed(ctx context.Context, wavPath, outDir, filenamePrefix string, sliceLength time.Duration, sampleRate int) ([]string, error) {
-	if err := ctx.Err(); err != nil {
+	if err := contextErr(ctx); err != nil {
 		return nil, err
 	}
 	cWAV, cOutDir, cPrefix := C.CString(wavPath), C.CString(outDir), C.CString(filenamePrefix)
 	defer C.free(unsafe.Pointer(cWAV))
 	defer C.free(unsafe.Pointer(cOutDir))
 	defer C.free(unsafe.Pointer(cPrefix))
+	cancelCB, cancelHandle, releaseCancel := libavCancel(ctx)
+	defer releaseCancel()
 	var cPaths **C.char
 	var cCount C.int
-	if rc := C.sa_split_wav_fixed(cWAV, cOutDir, cPrefix, C.int64_t(sliceLength/time.Microsecond), C.int(sampleRate), &cPaths, &cCount); rc != 0 {
+	if rc := C.sa_split_wav_fixed_ctx(cWAV, cOutDir, cPrefix, C.int64_t(sliceLength/time.Microsecond), C.int(sampleRate), &cPaths, &cCount, cancelCB, cancelHandle); rc != 0 {
+		if err := contextErr(ctx); err != nil {
+			return nil, err
+		}
 		return nil, libavError("split wav fixed")
+	}
+	if err := contextErr(ctx); err != nil {
+		C.sa_free_string_array(cPaths, cCount)
+		return nil, err
 	}
 	count := int(cCount)
 	defer C.sa_free_string_array(cPaths, cCount)
@@ -135,20 +193,25 @@ func (LibavBackend) SplitWAVFixed(ctx context.Context, wavPath, outDir, filename
 }
 
 func (LibavBackend) ExportWAV(ctx context.Context, inputPath, wavPath string, start, end time.Duration, sampleRate int) error {
-	if err := ctx.Err(); err != nil {
+	if err := contextErr(ctx); err != nil {
 		return err
 	}
 	cInput, cOut := C.CString(inputPath), C.CString(wavPath)
 	defer C.free(unsafe.Pointer(cInput))
 	defer C.free(unsafe.Pointer(cOut))
-	if rc := C.sa_export_wav(cInput, cOut, C.int64_t(start/time.Microsecond), C.int64_t(end/time.Microsecond), C.int(sampleRate)); rc != 0 {
+	cancelCB, cancelHandle, releaseCancel := libavCancel(ctx)
+	defer releaseCancel()
+	if rc := C.sa_export_wav_ctx(cInput, cOut, C.int64_t(start/time.Microsecond), C.int64_t(end/time.Microsecond), C.int(sampleRate), cancelCB, cancelHandle); rc != 0 {
+		if err := contextErr(ctx); err != nil {
+			return err
+		}
 		return libavError("export wav")
 	}
-	return nil
+	return contextErr(ctx)
 }
 
 func (LibavBackend) RenderIntervalsToWAV(ctx context.Context, inputPath, outWAVPath string, intervals []Interval, sampleRate int) error {
-	if err := ctx.Err(); err != nil {
+	if err := contextErr(ctx); err != nil {
 		return err
 	}
 	cInput, cOut := C.CString(inputPath), C.CString(outWAVPath)
@@ -165,14 +228,19 @@ func (LibavBackend) RenderIntervalsToWAV(ctx context.Context, inputPath, outWAVP
 	if len(cIntervals) > 0 {
 		ptr = &cIntervals[0]
 	}
-	if rc := C.sa_render_intervals_wav(cInput, cOut, ptr, C.int(len(cIntervals)), C.int(sampleRate)); rc != 0 {
+	cancelCB, cancelHandle, releaseCancel := libavCancel(ctx)
+	defer releaseCancel()
+	if rc := C.sa_render_intervals_wav_ctx(cInput, cOut, ptr, C.int(len(cIntervals)), C.int(sampleRate), cancelCB, cancelHandle); rc != 0 {
+		if err := contextErr(ctx); err != nil {
+			return err
+		}
 		return libavError("render intervals wav")
 	}
-	return nil
+	return contextErr(ctx)
 }
 
 func (LibavBackend) ConcatWAV(ctx context.Context, wavPaths []string, outPath string) error {
-	if err := ctx.Err(); err != nil {
+	if err := contextErr(ctx); err != nil {
 		return err
 	}
 	cOut := C.CString(outPath)
@@ -186,24 +254,34 @@ func (LibavBackend) ConcatWAV(ctx context.Context, wavPaths []string, outPath st
 	if len(cPaths) > 0 {
 		ptr = &cPaths[0]
 	}
-	if rc := C.sa_concat_wav(ptr, C.int(len(cPaths)), cOut); rc != 0 {
+	cancelCB, cancelHandle, releaseCancel := libavCancel(ctx)
+	defer releaseCancel()
+	if rc := C.sa_concat_wav_ctx(ptr, C.int(len(cPaths)), cOut, cancelCB, cancelHandle); rc != 0 {
+		if err := contextErr(ctx); err != nil {
+			return err
+		}
 		return libavError("concat wav")
 	}
-	return nil
+	return contextErr(ctx)
 }
 
 func (LibavBackend) EncodeOpus(ctx context.Context, wavPath, oggPath string, sampleRate int, bitrate string) error {
-	if err := ctx.Err(); err != nil {
+	if err := contextErr(ctx); err != nil {
 		return err
 	}
 	cWAV, cOGG, cBitrate := C.CString(wavPath), C.CString(oggPath), C.CString(bitrate)
 	defer C.free(unsafe.Pointer(cWAV))
 	defer C.free(unsafe.Pointer(cOGG))
 	defer C.free(unsafe.Pointer(cBitrate))
-	if rc := C.sa_encode_opus(cWAV, cOGG, C.int(sampleRate), cBitrate); rc != 0 {
+	cancelCB, cancelHandle, releaseCancel := libavCancel(ctx)
+	defer releaseCancel()
+	if rc := C.sa_encode_opus_ctx(cWAV, cOGG, C.int(sampleRate), cBitrate, cancelCB, cancelHandle); rc != 0 {
+		if err := contextErr(ctx); err != nil {
+			return err
+		}
 		return libavError("encode opus")
 	}
-	return nil
+	return contextErr(ctx)
 }
 
 func libavError(op string) error {

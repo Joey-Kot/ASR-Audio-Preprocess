@@ -301,6 +301,23 @@ func runProcess(ctx context.Context, p *smartaudio.Processor, opts cliOptions) e
 	if err != nil {
 		return err
 	}
+	if merged == "" {
+		info := combineProcessInfo(opts.input, "", preInfo, trimInfo, smartaudio.ProcessingInfo{})
+		info.DetectedEffectiveDuration = trimInfo.DetectedEffectiveDuration
+		info.EffectiveDuration = trimInfo.EffectiveDuration
+		info.OutputDuration = trimInfo.OutputDuration
+		info.DetectedSpeechIntervalCount = trimInfo.DetectedSpeechIntervalCount
+		return writeJSON(cliResult{
+			Mode:       opts.mode,
+			OutputPath: "",
+			Info:       infoToJSON(info),
+			Steps: &stepInfoJSON{
+				Preconvert: infoToJSON(preInfo),
+				FixedTrim:  infoToJSON(trimInfo),
+				Split:      infoToJSON(smartaudio.ProcessingInfo{}),
+			},
+		})
+	}
 	segments, splitInfo, err := p.SplitWAVBySilenceGroups(ctx, merged)
 	if err != nil {
 		return err
