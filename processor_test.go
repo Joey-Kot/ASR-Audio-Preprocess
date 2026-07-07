@@ -25,11 +25,22 @@ type fakeBackend struct {
 	splitCalled    bool
 	splitOutDir    string
 	splitPaths     []string
+	encodedAudio   []encodedAudioCall
 	useSilences    bool
 	silences       []Interval
 	exportFailures map[string]bool
 	renderFailures map[string]bool
+	encodeFailures map[string]bool
 	concatInputs   []string
+}
+
+type encodedAudioCall struct {
+	WAVPath    string
+	OutputPath string
+	SampleRate int
+	Format     string
+	Codec      string
+	Bitrate    string
 }
 
 func (f *fakeBackend) ProbeDuration(ctx context.Context, path string, order ProbeOrder) (time.Duration, error) {
@@ -88,6 +99,23 @@ func (f *fakeBackend) ConcatWAV(ctx context.Context, wavPaths []string, outPath 
 }
 
 func (f *fakeBackend) EncodeOpus(ctx context.Context, wavPath, oggPath string, sampleRate int, bitrate string) error {
+	return nil
+}
+
+func (f *fakeBackend) EncodeAudio(ctx context.Context, wavPath, outPath string, sampleRate int, format, codec, bitrate string) error {
+	f.encodedAudio = append(f.encodedAudio, encodedAudioCall{
+		WAVPath:    wavPath,
+		OutputPath: outPath,
+		SampleRate: sampleRate,
+		Format:     format,
+		Codec:      codec,
+		Bitrate:    bitrate,
+	})
+	for marker := range f.encodeFailures {
+		if strings.Contains(outPath, marker) || strings.Contains(wavPath, marker) || strings.Contains(format, marker) || strings.Contains(codec, marker) {
+			return errors.New("encode failed")
+		}
+	}
 	return nil
 }
 
@@ -252,6 +280,119 @@ func TestSplitWAVBySilenceGroupsSkipsFailedSegmentExports(t *testing.T) {
 	}
 	if info.SegmentSkipped != 1 {
 		t.Fatalf("segment skipped=%d", info.SegmentSkipped)
+	}
+}
+
+func TestSplitWAVBySilenceGroupsUsesConfiguredOutputAudio(t *testing.T) {
+	backend := &fakeBackend{duration: 10 * time.Second}
+	cfg := DefaultConfig()
+	cfg.Silence.Padding = 0
+	cfg.Segments.MaxLength = 20 * time.Second
+	cfg.Segments.OutDir = t.TempDir()
+	cfg.Segments.OutputFormat = "wav"
+	cfg.Segments.OutputCodec = "pcm_s16le"
+	cfg.Segments.OutputBitrate = "ignored"
+	p, err := NewProcessor(WithBackend(backend), WithConfig(cfg), WithSilencePadding(0))
+	if err != nil {
+		t.Fatal(err)
+	}
+	segments, _, err := p.SplitWAVBySilenceGroups(context.Background(), "/tmp/input.wav")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(segments) != 1 {
+		t.Fatalf("segments=%d want 1", len(segments))
+	}
+	if !strings.HasSuffix(segments[0].File, ".wav") {
+		t.Fatalf("segment file=%q want wav extension", segments[0].File)
+	}
+	if len(backend.encodedAudio) != 1 {
+		t.Fatalf("encoded audio calls=%d want 1", len(backend.encodedAudio))
+	}
+	call := backend.encodedAudio[0]
+	if call.Format != "wav" || call.Codec != "pcm_s16le" || call.Bitrate != "" {
+		t.Fatalf("encode call=%#v", call)
+	}
+}
+
+func TestSplitWAVBySilenceGroupsDefaultsCodecFromConfiguredOutputFormat(t *testing.T) {
+	backend := &fakeBackend{duration: 10 * time.Second}
+	cfg := DefaultConfig()
+	cfg.Silence.Padding = 0
+	cfg.Segments.MaxLength = 20 * time.Second
+	cfg.Segments.OutDir = t.TempDir()
+	cfg.Segments.OutputFormat = "flac"
+	p, err := NewProcessor(WithBackend(backend), WithConfig(cfg), WithSilencePadding(0))
+	if err != nil {
+		t.Fatal(err)
+	}
+	segments, _, err := p.SplitWAVBySilenceGroups(context.Background(), "/tmp/input.wav")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(segments) != 1 {
+		t.Fatalf("segments=%d want 1", len(segments))
+	}
+	if !strings.HasSuffix(segments[0].File, ".flac") {
+		t.Fatalf("segment file=%q want flac extension", segments[0].File)
+	}
+	if len(backend.encodedAudio) != 1 {
+		t.Fatalf("encoded audio calls=%d want 1", len(backend.encodedAudio))
+	}
+	call := backend.encodedAudio[0]
+	if call.Format != "flac" || call.Codec != "flac" || call.Bitrate != "" {
+		t.Fatalf("encode call=%#v", call)
+	}
+}
+
+func TestSplitWAVBySilenceGroupsFallsBackToWAVForDefaultEncodeFailure(t *testing.T) {
+	backend := &fakeBackend{
+		duration:       10 * time.Second,
+		encodeFailures: map[string]bool{"ogg": true},
+	}
+	cfg := DefaultConfig()
+	cfg.Silence.Padding = 0
+	cfg.Segments.MaxLength = 20 * time.Second
+	cfg.Segments.OutDir = t.TempDir()
+	p, err := NewProcessor(WithBackend(backend), WithConfig(cfg), WithSilencePadding(0))
+	if err != nil {
+		t.Fatal(err)
+	}
+	segments, _, err := p.SplitWAVBySilenceGroups(context.Background(), "/tmp/input.wav")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(segments) != 1 {
+		t.Fatalf("segments=%d want 1", len(segments))
+	}
+	if !strings.HasSuffix(segments[0].File, "_seg001.wav") {
+		t.Fatalf("segment file=%q want fallback temp wav", segments[0].File)
+	}
+}
+
+func TestSplitWAVBySilenceGroupsReturnsErrorForConfiguredOutputEncodeFailure(t *testing.T) {
+	backend := &fakeBackend{
+		duration:       10 * time.Second,
+		encodeFailures: map[string]bool{"flac": true},
+	}
+	cfg := DefaultConfig()
+	cfg.Silence.Padding = 0
+	cfg.Segments.MaxLength = 20 * time.Second
+	cfg.Segments.OutDir = t.TempDir()
+	cfg.Segments.OutputFormat = "flac"
+	p, err := NewProcessor(WithBackend(backend), WithConfig(cfg), WithSilencePadding(0))
+	if err != nil {
+		t.Fatal(err)
+	}
+	segments, _, err := p.SplitWAVBySilenceGroups(context.Background(), "/tmp/input.wav")
+	if err == nil {
+		t.Fatal("expected encode error for configured output")
+	}
+	if len(segments) != 0 {
+		t.Fatalf("segments=%d want none on encode error", len(segments))
+	}
+	if !strings.Contains(err.Error(), "encode segment 1 as flac/flac") {
+		t.Fatalf("error=%q", err)
 	}
 }
 

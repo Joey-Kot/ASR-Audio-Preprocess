@@ -149,6 +149,7 @@ func (p *Processor) SplitWAVBySilenceGroups(ctx context.Context, wavPath string)
 	base := strings.TrimSuffix(filepath.Base(wavPath), filepath.Ext(wavPath))
 	segments := make([]Segment, 0, len(groups))
 	preserveInternalSilence := boolValue(p.cfg.Segments.PreserveInternalSilence, true)
+	output := p.cfg.Segments.audioOutput()
 	for idx, group := range groups {
 		index := idx + 1
 		segWAV := filepath.Join(outDir, fmt.Sprintf("%s_seg%03d.wav", base, index))
@@ -163,9 +164,12 @@ func (p *Processor) SplitWAVBySilenceGroups(ctx context.Context, wavPath string)
 				continue
 			}
 		}
-		outOGG := filepath.Join(outDir, fmt.Sprintf("%s_part%03d.ogg", base, index))
-		file := outOGG
-		if err := p.backend.EncodeOpus(ctx, segWAV, outOGG, p.cfg.Segments.SampleRate, p.cfg.Segments.OpusBitrate); err != nil {
+		outAudio := filepath.Join(outDir, fmt.Sprintf("%s_part%03d.%s", base, index, output.Extension))
+		file := outAudio
+		if err := p.backend.EncodeAudio(ctx, segWAV, outAudio, p.cfg.Segments.SampleRate, output.Format, output.Codec, output.Bitrate); err != nil {
+			if !p.cfg.Segments.allowEncodeFallbackToWAV(output) {
+				return segments, info, fmt.Errorf("encode segment %d as %s/%s: %w", index, output.Format, output.Codec, err)
+			}
 			file = segWAV
 		}
 		start := group[0].Start

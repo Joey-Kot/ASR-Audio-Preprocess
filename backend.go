@@ -28,6 +28,7 @@ type Backend interface {
 	ExportWAV(ctx context.Context, inputPath, wavPath string, start, end time.Duration, sampleRate int) error
 	RenderIntervalsToWAV(ctx context.Context, inputPath, outWAVPath string, intervals []Interval, sampleRate int) error
 	ConcatWAV(ctx context.Context, wavPaths []string, outPath string) error
+	EncodeAudio(ctx context.Context, wavPath, outPath string, sampleRate int, format, codec, bitrate string) error
 	EncodeOpus(ctx context.Context, wavPath, oggPath string, sampleRate int, bitrate string) error
 }
 

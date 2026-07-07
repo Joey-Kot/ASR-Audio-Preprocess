@@ -97,6 +97,9 @@ build_ffmpeg() {
     --enable-demuxer=concat \
     --enable-muxer=wav \
     --enable-muxer=ogg \
+    --enable-muxer=flac \
+    --enable-muxer=adts \
+    --enable-muxer=mp4 \
     --enable-muxer=segment \
     --enable-parser=aac \
     --enable-parser=mpegaudio \
@@ -114,6 +117,8 @@ build_ffmpeg() {
     --enable-decoder=vorbis \
     --enable-decoder=alac \
     --enable-encoder=pcm_s16le \
+    --enable-encoder=flac \
+    --enable-encoder=aac \
     --enable-encoder=libopus \
     --enable-libopus \
     --enable-filter=abuffer \

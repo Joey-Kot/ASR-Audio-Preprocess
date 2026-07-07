@@ -11,7 +11,10 @@
 
 package smartaudio
 
-import "time"
+import (
+	"strings"
+	"time"
+)
 
 const (
 	DefaultSampleRate          = 16000
@@ -20,7 +23,9 @@ const (
 	DefaultFixedSliceLength    = 5 * time.Second
 	DefaultFixedSliceWorkers   = 16
 	DefaultMaxSegmentLength    = 175 * time.Second
-	DefaultOpusBitrate         = "32k"
+	DefaultOutputFormat        = "ogg"
+	DefaultOutputCodec         = "libopus"
+	DefaultOutputBitrate       = "32k"
 	DefaultMinOutputSegmentLen = 10 * time.Millisecond
 )
 
@@ -51,7 +56,9 @@ type FixedTrimConfig struct {
 type SegmentConfig struct {
 	MaxLength               time.Duration
 	SampleRate              int
-	OpusBitrate             string
+	OutputFormat            string
+	OutputCodec             string
+	OutputBitrate           string
 	OutDir                  string
 	KeepTempWAV             *bool
 	PreserveInternalSilence *bool
@@ -125,7 +132,9 @@ func DefaultConfig() Config {
 		Segments: SegmentConfig{
 			MaxLength:               DefaultMaxSegmentLength,
 			SampleRate:              DefaultSampleRate,
-			OpusBitrate:             DefaultOpusBitrate,
+			OutputFormat:            DefaultOutputFormat,
+			OutputCodec:             DefaultOutputCodec,
+			OutputBitrate:           DefaultOutputBitrate,
 			KeepTempWAV:             boolPtr(true),
 			PreserveInternalSilence: boolPtr(true),
 		},
@@ -176,8 +185,14 @@ func (c Config) normalized() Config {
 	if c.Segments.SampleRate > 0 {
 		d.Segments.SampleRate = c.Segments.SampleRate
 	}
-	if c.Segments.OpusBitrate != "" {
-		d.Segments.OpusBitrate = c.Segments.OpusBitrate
+	if c.Segments.OutputFormat != "" {
+		d.Segments.OutputFormat = normalizeAudioFormat(c.Segments.OutputFormat)
+	}
+	if c.Segments.OutputCodec != "" {
+		d.Segments.OutputCodec = normalizeAudioCodec(c.Segments.OutputCodec)
+	}
+	if c.Segments.OutputBitrate != "" {
+		d.Segments.OutputBitrate = strings.TrimSpace(c.Segments.OutputBitrate)
 	}
 	if c.Segments.OutDir != "" {
 		d.Segments.OutDir = c.Segments.OutDir
@@ -197,4 +212,111 @@ func Bool(v bool) *bool {
 
 func boolPtr(v bool) *bool {
 	return &v
+}
+
+func (c SegmentConfig) audioOutput() audioOutputConfig {
+	format := normalizeAudioFormat(c.OutputFormat)
+	if format == "" {
+		format = DefaultOutputFormat
+	}
+	codec := normalizeAudioCodec(c.OutputCodec)
+	if codec == "" {
+		codec = defaultCodecForFormat(format)
+	}
+	if format != DefaultOutputFormat && codec == DefaultOutputCodec {
+		codec = defaultCodecForFormat(format)
+	}
+	bitrate := strings.TrimSpace(c.OutputBitrate)
+	if bitrate == "" {
+		bitrate = DefaultOutputBitrate
+	}
+	if !codecUsesBitrate(codec) {
+		bitrate = ""
+	}
+	return audioOutputConfig{
+		Format:    format,
+		Codec:     codec,
+		Bitrate:   bitrate,
+		Extension: extensionForFormat(format, codec),
+	}
+}
+
+func (c SegmentConfig) allowEncodeFallbackToWAV(output audioOutputConfig) bool {
+	return output.Format == DefaultOutputFormat &&
+		output.Codec == DefaultOutputCodec &&
+		output.Bitrate == DefaultOutputBitrate &&
+		strings.TrimSpace(c.OutputBitrate) == DefaultOutputBitrate
+}
+
+type audioOutputConfig struct {
+	Format    string
+	Codec     string
+	Bitrate   string
+	Extension string
+}
+
+func normalizeAudioFormat(format string) string {
+	format = strings.ToLower(strings.TrimSpace(format))
+	format = strings.TrimPrefix(format, ".")
+	switch format {
+	case "aac":
+		return "adts"
+	case "m4a":
+		return "mp4"
+	case "opus":
+		return "ogg"
+	default:
+		return format
+	}
+}
+
+func normalizeAudioCodec(codec string) string {
+	return strings.ToLower(strings.TrimSpace(codec))
+}
+
+func defaultCodecForFormat(format string) string {
+	switch normalizeAudioFormat(format) {
+	case "wav":
+		return "pcm_s16le"
+	case "flac":
+		return "flac"
+	case "adts", "mp4":
+		return "aac"
+	default:
+		return DefaultOutputCodec
+	}
+}
+
+func extensionForFormat(format, codec string) string {
+	switch normalizeAudioFormat(format) {
+	case "wav":
+		return "wav"
+	case "flac":
+		return "flac"
+	case "adts":
+		return "aac"
+	case "mp4":
+		return "m4a"
+	case "ogg":
+		if strings.EqualFold(codec, "opus") {
+			return "ogg"
+		}
+		return "ogg"
+	default:
+		format = strings.TrimPrefix(strings.TrimSpace(format), ".")
+		if format == "" {
+			return DefaultOutputFormat
+		}
+		return format
+	}
+}
+
+func codecUsesBitrate(codec string) bool {
+	codec = strings.ToLower(strings.TrimSpace(codec))
+	switch codec {
+	case "libopus", "opus", "aac":
+		return true
+	default:
+		return false
+	}
 }

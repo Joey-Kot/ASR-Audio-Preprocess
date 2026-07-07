@@ -27,6 +27,8 @@ int sa_render_intervals_wav(const char *input_path, const char *out_path, const 
 int sa_render_intervals_wav_ctx(const char *input_path, const char *out_path, const sa_interval *intervals, int interval_count, int sample_rate, sa_cancel_cb cancel_cb, sa_cancel_handle cancel_handle);
 int sa_concat_wav(const char **paths, int path_count, const char *out_path);
 int sa_concat_wav_ctx(const char **paths, int path_count, const char *out_path, sa_cancel_cb cancel_cb, sa_cancel_handle cancel_handle);
+int sa_encode_audio(const char *wav_path, const char *out_path, int sample_rate, const char *format_name, const char *codec_name, const char *bitrate);
+int sa_encode_audio_ctx(const char *wav_path, const char *out_path, int sample_rate, const char *format_name, const char *codec_name, const char *bitrate, sa_cancel_cb cancel_cb, sa_cancel_handle cancel_handle);
 int sa_encode_opus(const char *wav_path, const char *ogg_path, int sample_rate, const char *bitrate);
 int sa_encode_opus_ctx(const char *wav_path, const char *ogg_path, int sample_rate, const char *bitrate, sa_cancel_cb cancel_cb, sa_cancel_handle cancel_handle);
 const char *sa_last_error(void);

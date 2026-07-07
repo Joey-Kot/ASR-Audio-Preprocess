@@ -102,6 +102,62 @@ func TestLibavRenderMultipleIntervalsToWAV(t *testing.T) {
 	}
 }
 
+func TestLibavSplitUsesConfiguredOutputAudio(t *testing.T) {
+	cases := []struct {
+		name      string
+		format    string
+		codec     string
+		bitrate   string
+		extension string
+	}{
+		{name: "wav", format: "wav", codec: "pcm_s16le", extension: ".wav"},
+		{name: "flac", format: "flac", codec: "flac", extension: ".flac"},
+		{name: "aac", format: "adts", codec: "aac", bitrate: "64k", extension: ".aac"},
+		{name: "m4a", format: "mp4", codec: "aac", bitrate: "64k", extension: ".m4a"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			dir := t.TempDir()
+			input := filepath.Join(dir, "input.wav")
+			writeTwoSpeechIntervalTestWAV(t, input)
+
+			cfg := DefaultConfig()
+			cfg.Silence.MinSilence = 700 * time.Millisecond
+			cfg.Silence.Padding = 100 * time.Millisecond
+			cfg.Segments.SampleRate = 16000
+			cfg.Segments.MaxLength = 10 * time.Second
+			cfg.Segments.OutDir = filepath.Join(dir, "out")
+			cfg.Segments.OutputFormat = tc.format
+			cfg.Segments.OutputCodec = tc.codec
+			cfg.Segments.OutputBitrate = tc.bitrate
+			p, err := NewProcessor(WithConfig(cfg))
+			if err != nil {
+				t.Fatal(err)
+			}
+			segments, info, err := p.SplitWAVBySilenceGroups(context.Background(), input)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if len(segments) != 1 {
+				t.Fatalf("segments=%d want 1", len(segments))
+			}
+			if filepath.Ext(segments[0].File) != tc.extension {
+				t.Fatalf("file=%q want extension %q", segments[0].File, tc.extension)
+			}
+			if len(info.OutputFiles) != 1 || info.OutputFiles[0] != segments[0].File {
+				t.Fatalf("output files=%#v segment file=%q", info.OutputFiles, segments[0].File)
+			}
+			duration, err := p.ProbeDuration(context.Background(), segments[0].File, ProbeMediaFirst)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if duration <= 0 {
+				t.Fatalf("duration=%s", duration)
+			}
+		})
+	}
+}
+
 func TestLibavRemoveSilenceByFixedSlicesAndMerge(t *testing.T) {
 	dir := t.TempDir()
 	input := filepath.Join(dir, "input.wav")
