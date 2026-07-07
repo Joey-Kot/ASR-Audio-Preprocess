@@ -76,6 +76,32 @@ func TestLibavTrimLongSilencesFromWAV(t *testing.T) {
 	}
 }
 
+func TestLibavRenderMultipleIntervalsToWAV(t *testing.T) {
+	dir := t.TempDir()
+	input := filepath.Join(dir, "input.wav")
+	output := filepath.Join(dir, "multi.wav")
+	writeTwoSpeechIntervalTestWAV(t, input)
+
+	p, err := NewProcessor()
+	if err != nil {
+		t.Fatal(err)
+	}
+	intervals := []Interval{
+		{Start: 0, End: 500 * time.Millisecond},
+		{Start: 1500 * time.Millisecond, End: 2 * time.Second},
+	}
+	if err := p.backend.RenderIntervalsToWAV(context.Background(), input, output, intervals, 16000); err != nil {
+		t.Fatal(err)
+	}
+	duration, err := p.ProbeDuration(context.Background(), output, ProbeWAVFirst)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if duration < 900*time.Millisecond || duration > 1100*time.Millisecond {
+		t.Fatalf("duration=%s want about 1s", duration)
+	}
+}
+
 func TestLibavRemoveSilenceByFixedSlicesAndMerge(t *testing.T) {
 	dir := t.TempDir()
 	input := filepath.Join(dir, "input.wav")
@@ -122,10 +148,31 @@ func TestLibavRemoveSilenceByFixedSlicesAndMerge(t *testing.T) {
 	}
 }
 
+func writeTwoSpeechIntervalTestWAV(t *testing.T, path string) {
+	t.Helper()
+	writePatternTestWAV(t, path, 3, func(i, sampleRate int) int16 {
+		if i < sampleRate/2 || (i >= sampleRate+sampleRate/2 && i < 2*sampleRate) {
+			phase := 2 * math.Pi * 440 * float64(i) / float64(sampleRate)
+			return int16(math.Sin(phase) * 12000)
+		}
+		return 0
+	})
+}
+
 func writeTestWAV(t *testing.T, path string) {
 	t.Helper()
+	writePatternTestWAV(t, path, 3, func(i, sampleRate int) int16 {
+		if i >= sampleRate && i < 2*sampleRate {
+			phase := 2 * math.Pi * 440 * float64(i-sampleRate) / float64(sampleRate)
+			return int16(math.Sin(phase) * 12000)
+		}
+		return 0
+	})
+}
+
+func writePatternTestWAV(t *testing.T, path string, seconds int, sampleAt func(i, sampleRate int) int16) {
+	t.Helper()
 	const sampleRate = 16000
-	const seconds = 3
 	samples := sampleRate * seconds
 	dataBytes := samples * 2
 	f, err := os.Create(path)
@@ -158,11 +205,6 @@ func writeTestWAV(t *testing.T, path string) {
 	}
 	write(uint32(dataBytes))
 	for i := 0; i < samples; i++ {
-		v := int16(0)
-		if i >= sampleRate && i < 2*sampleRate {
-			phase := 2 * math.Pi * 440 * float64(i-sampleRate) / sampleRate
-			v = int16(math.Sin(phase) * 12000)
-		}
-		write(v)
+		write(sampleAt(i, sampleRate))
 	}
 }

@@ -58,6 +58,7 @@ cd "$FFMPEG_DIR"
   --enable-filter=abuffersink \
   --enable-filter=aformat \
   --enable-filter=aresample \
+  --enable-filter=asplit \
   --enable-filter=atrim \
   --enable-filter=asetpts \
   --enable-filter=concat \

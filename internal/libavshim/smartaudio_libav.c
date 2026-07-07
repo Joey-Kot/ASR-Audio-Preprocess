@@ -929,7 +929,7 @@ int sa_render_intervals_wav_ctx(const char *input_path, const char *out_path, co
                  (double)intervals[0].end_us / 1000000.0);
         return sa_render_filter_to_output_ctx(input_path, out_path, "wav", AV_CODEC_ID_PCM_S16LE, sample_rate > 0 ? sample_rate : 16000, 0, filter, &cancel);
     }
-    int n = snprintf(filter + used, sizeof(filter) - used, "asplit=%d", interval_count);
+    int n = snprintf(filter + used, sizeof(filter) - used, "asplit=outputs=%d", interval_count);
     if (n < 0 || (size_t)n >= sizeof(filter) - used) {
         sa_set_error("filter graph too large");
         return AVERROR(ENOMEM);
