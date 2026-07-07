@@ -32,7 +32,7 @@ func TestLibavTrimLongSilencesFromWAV(t *testing.T) {
 	cfg := DefaultConfig()
 	cfg.Silence.MinSilence = 700 * time.Millisecond
 	cfg.Silence.Padding = 100 * time.Millisecond
-	cfg.Segments.SampleRate = 16000
+	cfg.Segments.OutputSampleRate = 16000
 	p, err := NewProcessor(WithConfig(cfg))
 	if err != nil {
 		t.Fatal(err)
@@ -108,9 +108,11 @@ func TestLibavSplitUsesConfiguredOutputAudio(t *testing.T) {
 		format    string
 		codec     string
 		bitrate   string
+		sampleFmt string
 		extension string
 	}{
 		{name: "wav", format: "wav", codec: "pcm_s16le", extension: ".wav"},
+		{name: "wav_s24", format: "wav", codec: "pcm_s24le", sampleFmt: "s24", extension: ".wav"},
 		{name: "flac", format: "flac", codec: "flac", extension: ".flac"},
 		{name: "aac", format: "adts", codec: "aac", bitrate: "64k", extension: ".aac"},
 		{name: "m4a", format: "mp4", codec: "aac", bitrate: "64k", extension: ".m4a"},
@@ -124,12 +126,13 @@ func TestLibavSplitUsesConfiguredOutputAudio(t *testing.T) {
 			cfg := DefaultConfig()
 			cfg.Silence.MinSilence = 700 * time.Millisecond
 			cfg.Silence.Padding = 100 * time.Millisecond
-			cfg.Segments.SampleRate = 16000
+			cfg.Segments.OutputSampleRate = 16000
 			cfg.Segments.MaxLength = 10 * time.Second
 			cfg.Segments.OutDir = filepath.Join(dir, "out")
 			cfg.Segments.OutputFormat = tc.format
 			cfg.Segments.OutputCodec = tc.codec
 			cfg.Segments.OutputBitrate = tc.bitrate
+			cfg.Segments.OutputSampleFormat = tc.sampleFmt
 			p, err := NewProcessor(WithConfig(cfg))
 			if err != nil {
 				t.Fatal(err)
@@ -170,7 +173,7 @@ func TestLibavRemoveSilenceByFixedSlicesAndMerge(t *testing.T) {
 	cfg.FixedTrim.SliceLength = 1 * time.Second
 	cfg.FixedTrim.Workers = 2
 	cfg.FixedTrim.TempDir = filepath.Join(dir, "work")
-	cfg.Segments.SampleRate = 16000
+	cfg.Segments.OutputSampleRate = 16000
 	p, err := NewProcessor(WithConfig(cfg))
 	if err != nil {
 		t.Fatal(err)

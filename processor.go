@@ -59,7 +59,7 @@ func (p *Processor) PreconvertToWAV(ctx context.Context, inputPath, wavPath stri
 	}
 	info.InputDuration = duration
 	if sampleRate <= 0 {
-		sampleRate = p.cfg.Segments.SampleRate
+		sampleRate = p.cfg.Segments.OutputSampleRate
 	}
 	if err := p.backend.TranscodeToWAV(ctx, inputPath, wavPath, sampleRate); err != nil {
 		return info, err
@@ -100,7 +100,7 @@ func (p *Processor) TrimLongSilencesFromWAV(ctx context.Context, wavPath, outWAV
 		ext := filepath.Ext(wavPath)
 		outWAVPath = strings.TrimSuffix(wavPath, ext) + "_nosilence.wav"
 	}
-	if err := p.backend.RenderIntervalsToWAV(ctx, wavPath, outWAVPath, intervals, p.cfg.Segments.SampleRate); err != nil {
+	if err := p.backend.RenderIntervalsToWAV(ctx, wavPath, outWAVPath, intervals, p.cfg.Segments.OutputSampleRate); err != nil {
 		return wavPath, info, err
 	}
 	info.OutputPath = outWAVPath
@@ -154,19 +154,19 @@ func (p *Processor) SplitWAVBySilenceGroups(ctx context.Context, wavPath string)
 		index := idx + 1
 		segWAV := filepath.Join(outDir, fmt.Sprintf("%s_seg%03d.wav", base, index))
 		if preserveInternalSilence {
-			if err := p.backend.ExportWAV(ctx, wavPath, segWAV, group[0].Start, group[len(group)-1].End, p.cfg.Segments.SampleRate); err != nil {
+			if err := p.backend.ExportWAV(ctx, wavPath, segWAV, group[0].Start, group[len(group)-1].End, p.cfg.Segments.OutputSampleRate); err != nil {
 				info.SegmentSkipped++
 				continue
 			}
 		} else {
-			if err := p.backend.RenderIntervalsToWAV(ctx, wavPath, segWAV, group, p.cfg.Segments.SampleRate); err != nil {
+			if err := p.backend.RenderIntervalsToWAV(ctx, wavPath, segWAV, group, p.cfg.Segments.OutputSampleRate); err != nil {
 				info.SegmentSkipped++
 				continue
 			}
 		}
 		outAudio := filepath.Join(outDir, fmt.Sprintf("%s_part%03d.%s", base, index, output.Extension))
 		file := outAudio
-		if err := p.backend.EncodeAudio(ctx, segWAV, outAudio, p.cfg.Segments.SampleRate, output.Format, output.Codec, output.Bitrate); err != nil {
+		if err := p.backend.EncodeAudio(ctx, segWAV, outAudio, p.cfg.Segments.OutputSampleRate, output.Format, output.Codec, output.Bitrate, output.SampleFormat); err != nil {
 			if !p.cfg.Segments.allowEncodeFallbackToWAV(output) {
 				return segments, info, fmt.Errorf("encode segment %d as %s/%s: %w", index, output.Format, output.Codec, err)
 			}
@@ -253,7 +253,7 @@ func (p *Processor) RemoveSilenceByFixedSlicesAndMerge(ctx context.Context, wavP
 		return wavPath, info, err
 	}
 	base := strings.TrimSuffix(filepath.Base(wavPath), filepath.Ext(wavPath))
-	slicePaths, err := p.backend.SplitWAVFixed(ctx, wavPath, sliceDir, base+"_slice", cfg.FixedTrim.SliceLength, cfg.Segments.SampleRate)
+	slicePaths, err := p.backend.SplitWAVFixed(ctx, wavPath, sliceDir, base+"_slice", cfg.FixedTrim.SliceLength, cfg.Segments.OutputSampleRate)
 	if err != nil {
 		return wavPath, info, err
 	}

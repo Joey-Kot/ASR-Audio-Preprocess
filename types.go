@@ -17,15 +17,16 @@ import (
 )
 
 const (
-	DefaultSampleRate          = 16000
 	DefaultSilentInterval      = 700 * time.Millisecond
 	DefaultPadding             = 100 * time.Millisecond
 	DefaultFixedSliceLength    = 5 * time.Second
 	DefaultFixedSliceWorkers   = 16
 	DefaultMaxSegmentLength    = 175 * time.Second
+	DefaultOutputSampleRate    = 16000
 	DefaultOutputFormat        = "ogg"
 	DefaultOutputCodec         = "libopus"
 	DefaultOutputBitrate       = "32k"
+	DefaultOutputSampleFormat  = "s16"
 	DefaultMinOutputSegmentLen = 10 * time.Millisecond
 )
 
@@ -55,10 +56,11 @@ type FixedTrimConfig struct {
 
 type SegmentConfig struct {
 	MaxLength               time.Duration
-	SampleRate              int
+	OutputSampleRate        int
 	OutputFormat            string
 	OutputCodec             string
 	OutputBitrate           string
+	OutputSampleFormat      string
 	OutDir                  string
 	KeepTempWAV             *bool
 	PreserveInternalSilence *bool
@@ -131,10 +133,11 @@ func DefaultConfig() Config {
 		},
 		Segments: SegmentConfig{
 			MaxLength:               DefaultMaxSegmentLength,
-			SampleRate:              DefaultSampleRate,
+			OutputSampleRate:        DefaultOutputSampleRate,
 			OutputFormat:            DefaultOutputFormat,
 			OutputCodec:             DefaultOutputCodec,
 			OutputBitrate:           DefaultOutputBitrate,
+			OutputSampleFormat:      DefaultOutputSampleFormat,
 			KeepTempWAV:             boolPtr(true),
 			PreserveInternalSilence: boolPtr(true),
 		},
@@ -182,8 +185,8 @@ func (c Config) normalized() Config {
 	if c.Segments.MaxLength > 0 {
 		d.Segments.MaxLength = c.Segments.MaxLength
 	}
-	if c.Segments.SampleRate > 0 {
-		d.Segments.SampleRate = c.Segments.SampleRate
+	if c.Segments.OutputSampleRate > 0 {
+		d.Segments.OutputSampleRate = c.Segments.OutputSampleRate
 	}
 	if c.Segments.OutputFormat != "" {
 		d.Segments.OutputFormat = normalizeAudioFormat(c.Segments.OutputFormat)
@@ -193,6 +196,9 @@ func (c Config) normalized() Config {
 	}
 	if c.Segments.OutputBitrate != "" {
 		d.Segments.OutputBitrate = strings.TrimSpace(c.Segments.OutputBitrate)
+	}
+	if c.Segments.OutputSampleFormat != "" {
+		d.Segments.OutputSampleFormat = normalizeAudioSampleFormat(c.Segments.OutputSampleFormat)
 	}
 	if c.Segments.OutDir != "" {
 		d.Segments.OutDir = c.Segments.OutDir
@@ -226,6 +232,13 @@ func (c SegmentConfig) audioOutput() audioOutputConfig {
 	if format != DefaultOutputFormat && codec == DefaultOutputCodec {
 		codec = defaultCodecForFormat(format)
 	}
+	sampleFormat := normalizeAudioSampleFormat(c.OutputSampleFormat)
+	if sampleFormat == "" {
+		sampleFormat = DefaultOutputSampleFormat
+	}
+	if format == "wav" && codec == "pcm_s16le" && sampleFormat != "" {
+		codec = codecForWAVSampleFormat(sampleFormat)
+	}
 	bitrate := strings.TrimSpace(c.OutputBitrate)
 	if bitrate == "" {
 		bitrate = DefaultOutputBitrate
@@ -234,10 +247,11 @@ func (c SegmentConfig) audioOutput() audioOutputConfig {
 		bitrate = ""
 	}
 	return audioOutputConfig{
-		Format:    format,
-		Codec:     codec,
-		Bitrate:   bitrate,
-		Extension: extensionForFormat(format, codec),
+		Format:       format,
+		Codec:        codec,
+		Bitrate:      bitrate,
+		SampleFormat: sampleFormat,
+		Extension:    extensionForFormat(format, codec),
 	}
 }
 
@@ -245,14 +259,16 @@ func (c SegmentConfig) allowEncodeFallbackToWAV(output audioOutputConfig) bool {
 	return output.Format == DefaultOutputFormat &&
 		output.Codec == DefaultOutputCodec &&
 		output.Bitrate == DefaultOutputBitrate &&
+		output.SampleFormat == DefaultOutputSampleFormat &&
 		strings.TrimSpace(c.OutputBitrate) == DefaultOutputBitrate
 }
 
 type audioOutputConfig struct {
-	Format    string
-	Codec     string
-	Bitrate   string
-	Extension string
+	Format       string
+	Codec        string
+	Bitrate      string
+	SampleFormat string
+	Extension    string
 }
 
 func normalizeAudioFormat(format string) string {
@@ -272,6 +288,35 @@ func normalizeAudioFormat(format string) string {
 
 func normalizeAudioCodec(codec string) string {
 	return strings.ToLower(strings.TrimSpace(codec))
+}
+
+func normalizeAudioSampleFormat(sampleFormat string) string {
+	sampleFormat = strings.ToLower(strings.TrimSpace(sampleFormat))
+	switch sampleFormat {
+	case "16", "16bit", "int16", "pcm_s16le":
+		return "s16"
+	case "24", "24bit", "int24", "pcm_s24le":
+		return "s24"
+	case "32", "32bit", "int32", "pcm_s32le":
+		return "s32"
+	case "float", "float32", "f32", "flt", "pcm_f32le":
+		return "f32"
+	default:
+		return sampleFormat
+	}
+}
+
+func codecForWAVSampleFormat(sampleFormat string) string {
+	switch normalizeAudioSampleFormat(sampleFormat) {
+	case "s24":
+		return "pcm_s24le"
+	case "s32":
+		return "pcm_s32le"
+	case "f32":
+		return "pcm_f32le"
+	default:
+		return "pcm_s16le"
+	}
 }
 
 func defaultCodecForFormat(format string) string {

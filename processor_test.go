@@ -41,6 +41,7 @@ type encodedAudioCall struct {
 	Format     string
 	Codec      string
 	Bitrate    string
+	SampleFmt  string
 }
 
 func (f *fakeBackend) ProbeDuration(ctx context.Context, path string, order ProbeOrder) (time.Duration, error) {
@@ -102,7 +103,7 @@ func (f *fakeBackend) EncodeOpus(ctx context.Context, wavPath, oggPath string, s
 	return nil
 }
 
-func (f *fakeBackend) EncodeAudio(ctx context.Context, wavPath, outPath string, sampleRate int, format, codec, bitrate string) error {
+func (f *fakeBackend) EncodeAudio(ctx context.Context, wavPath, outPath string, sampleRate int, format, codec, bitrate, sampleFormat string) error {
 	f.encodedAudio = append(f.encodedAudio, encodedAudioCall{
 		WAVPath:    wavPath,
 		OutputPath: outPath,
@@ -110,6 +111,7 @@ func (f *fakeBackend) EncodeAudio(ctx context.Context, wavPath, outPath string, 
 		Format:     format,
 		Codec:      codec,
 		Bitrate:    bitrate,
+		SampleFmt:  sampleFormat,
 	})
 	for marker := range f.encodeFailures {
 		if strings.Contains(outPath, marker) || strings.Contains(wavPath, marker) || strings.Contains(format, marker) || strings.Contains(codec, marker) {
@@ -289,6 +291,7 @@ func TestSplitWAVBySilenceGroupsUsesConfiguredOutputAudio(t *testing.T) {
 	cfg.Silence.Padding = 0
 	cfg.Segments.MaxLength = 20 * time.Second
 	cfg.Segments.OutDir = t.TempDir()
+	cfg.Segments.OutputSampleRate = 22050
 	cfg.Segments.OutputFormat = "wav"
 	cfg.Segments.OutputCodec = "pcm_s16le"
 	cfg.Segments.OutputBitrate = "ignored"
@@ -310,7 +313,35 @@ func TestSplitWAVBySilenceGroupsUsesConfiguredOutputAudio(t *testing.T) {
 		t.Fatalf("encoded audio calls=%d want 1", len(backend.encodedAudio))
 	}
 	call := backend.encodedAudio[0]
-	if call.Format != "wav" || call.Codec != "pcm_s16le" || call.Bitrate != "" {
+	if call.SampleRate != 22050 || call.Format != "wav" || call.Codec != "pcm_s16le" || call.Bitrate != "" {
+		t.Fatalf("encode call=%#v", call)
+	}
+}
+
+func TestSplitWAVBySilenceGroupsUsesConfiguredWAVSampleFormat(t *testing.T) {
+	backend := &fakeBackend{duration: 10 * time.Second}
+	cfg := DefaultConfig()
+	cfg.Silence.Padding = 0
+	cfg.Segments.MaxLength = 20 * time.Second
+	cfg.Segments.OutDir = t.TempDir()
+	cfg.Segments.OutputFormat = "wav"
+	cfg.Segments.OutputSampleFormat = "s24"
+	p, err := NewProcessor(WithBackend(backend), WithConfig(cfg), WithSilencePadding(0))
+	if err != nil {
+		t.Fatal(err)
+	}
+	segments, _, err := p.SplitWAVBySilenceGroups(context.Background(), "/tmp/input.wav")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(segments) != 1 {
+		t.Fatalf("segments=%d want 1", len(segments))
+	}
+	if len(backend.encodedAudio) != 1 {
+		t.Fatalf("encoded audio calls=%d want 1", len(backend.encodedAudio))
+	}
+	call := backend.encodedAudio[0]
+	if call.Format != "wav" || call.Codec != "pcm_s24le" || call.SampleFmt != "s24" {
 		t.Fatalf("encode call=%#v", call)
 	}
 }

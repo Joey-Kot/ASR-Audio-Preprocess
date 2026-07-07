@@ -117,6 +117,9 @@ build_ffmpeg() {
     --enable-decoder=vorbis \
     --enable-decoder=alac \
     --enable-encoder=pcm_s16le \
+    --enable-encoder=pcm_s24le \
+    --enable-encoder=pcm_s32le \
+    --enable-encoder=pcm_f32le \
     --enable-encoder=flac \
     --enable-encoder=aac \
     --enable-encoder=libopus \

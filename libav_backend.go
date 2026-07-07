@@ -266,23 +266,24 @@ func (LibavBackend) ConcatWAV(ctx context.Context, wavPaths []string, outPath st
 }
 
 func (LibavBackend) EncodeOpus(ctx context.Context, wavPath, oggPath string, sampleRate int, bitrate string) error {
-	return (LibavBackend{}).EncodeAudio(ctx, wavPath, oggPath, sampleRate, "ogg", "libopus", bitrate)
+	return (LibavBackend{}).EncodeAudio(ctx, wavPath, oggPath, sampleRate, "ogg", "libopus", bitrate, DefaultOutputSampleFormat)
 }
 
-func (LibavBackend) EncodeAudio(ctx context.Context, wavPath, outPath string, sampleRate int, format, codec, bitrate string) error {
+func (LibavBackend) EncodeAudio(ctx context.Context, wavPath, outPath string, sampleRate int, format, codec, bitrate, sampleFormat string) error {
 	if err := contextErr(ctx); err != nil {
 		return err
 	}
 	cWAV, cOut := C.CString(wavPath), C.CString(outPath)
-	cFormat, cCodec, cBitrate := C.CString(format), C.CString(codec), C.CString(bitrate)
+	cFormat, cCodec, cBitrate, cSampleFormat := C.CString(format), C.CString(codec), C.CString(bitrate), C.CString(sampleFormat)
 	defer C.free(unsafe.Pointer(cWAV))
 	defer C.free(unsafe.Pointer(cOut))
 	defer C.free(unsafe.Pointer(cFormat))
 	defer C.free(unsafe.Pointer(cCodec))
 	defer C.free(unsafe.Pointer(cBitrate))
+	defer C.free(unsafe.Pointer(cSampleFormat))
 	cancelCB, cancelHandle, releaseCancel := libavCancel(ctx)
 	defer releaseCancel()
-	if rc := C.sa_encode_audio_ctx(cWAV, cOut, C.int(sampleRate), cFormat, cCodec, cBitrate, cancelCB, cancelHandle); rc != 0 {
+	if rc := C.sa_encode_audio_ctx(cWAV, cOut, C.int(sampleRate), cFormat, cCodec, cBitrate, cSampleFormat, cancelCB, cancelHandle); rc != 0 {
 		if err := contextErr(ctx); err != nil {
 			return err
 		}

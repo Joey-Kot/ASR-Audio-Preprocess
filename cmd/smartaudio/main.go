@@ -33,10 +33,11 @@ type cliOptions struct {
 	wav                     string
 	workDir                 string
 	outDir                  string
-	sampleRate              int
+	outputSampleRate        int
 	outputFormat            string
 	outputCodec             string
 	outputBitrate           string
+	outputSampleFormat      string
 	minSilence              time.Duration
 	silencePadding          time.Duration
 	fixedSliceLength        time.Duration
@@ -123,10 +124,11 @@ func parseFlags() cliOptions {
 	flag.StringVar(&opts.wav, "wav", "", "intermediate WAV path for process mode")
 	flag.StringVar(&opts.workDir, "work-dir", "", "working directory for process mode and fixed slice temp files")
 	flag.StringVar(&opts.outDir, "out-dir", "", "segment output directory")
-	flag.IntVar(&opts.sampleRate, "sample-rate", smartaudio.DefaultSampleRate, "output sample rate")
+	flag.IntVar(&opts.outputSampleRate, "output-sample-rate", smartaudio.DefaultOutputSampleRate, "segment output sample rate")
 	flag.StringVar(&opts.outputFormat, "output-format", smartaudio.DefaultOutputFormat, "segment output container format, for example ogg, wav, flac, aac, or m4a")
-	flag.StringVar(&opts.outputCodec, "output-codec", smartaudio.DefaultOutputCodec, "segment output encoder, for example libopus, pcm_s16le, flac, or aac")
+	flag.StringVar(&opts.outputCodec, "output-codec", smartaudio.DefaultOutputCodec, "segment output encoder, for example libopus, pcm_s16le, pcm_s24le, pcm_s32le, pcm_f32le, flac, or aac")
 	flag.StringVar(&opts.outputBitrate, "output-bitrate", smartaudio.DefaultOutputBitrate, "segment output bitrate, for example 32k or 64k")
+	flag.StringVar(&opts.outputSampleFormat, "output-sample-format", smartaudio.DefaultOutputSampleFormat, "segment output sample format, for example s16, s24, s32, or f32")
 	flag.DurationVar(&opts.minSilence, "min-silence", smartaudio.DefaultSilentInterval, "minimum silence duration, for example 700ms")
 	flag.DurationVar(&opts.silencePadding, "silence-padding", smartaudio.DefaultPadding, "padding around retained speech, for example 100ms")
 	flag.DurationVar(&opts.fixedSliceLength, "fixed-slice-length", smartaudio.DefaultFixedSliceLength, "fixed slice length, for example 5s")
@@ -173,10 +175,11 @@ func buildConfig(opts cliOptions) (smartaudio.Config, error) {
 	cfg.FixedTrim.SliceLength = opts.fixedSliceLength
 	cfg.FixedTrim.Workers = opts.fixedSliceWorkers
 	cfg.Segments.MaxLength = opts.maxSegmentLength
-	cfg.Segments.SampleRate = opts.sampleRate
+	cfg.Segments.OutputSampleRate = opts.outputSampleRate
 	cfg.Segments.OutputFormat = opts.outputFormat
 	cfg.Segments.OutputCodec = opts.outputCodec
 	cfg.Segments.OutputBitrate = opts.outputBitrate
+	cfg.Segments.OutputSampleFormat = opts.outputSampleFormat
 	cfg.Segments.OutDir = opts.outDir
 	if opts.mode == "process" && cfg.Segments.OutDir == "" {
 		cfg.Segments.OutDir = filepath.Join(filepath.Dir(opts.input), "out_segments")
@@ -205,7 +208,7 @@ func runPreconvert(ctx context.Context, p *smartaudio.Processor, opts cliOptions
 	if opts.output == "" {
 		return errors.New("--output is required for --mode preconvert")
 	}
-	info, err := p.PreconvertToWAV(ctx, opts.input, opts.output, opts.sampleRate)
+	info, err := p.PreconvertToWAV(ctx, opts.input, opts.output, opts.outputSampleRate)
 	if err != nil {
 		return err
 	}
@@ -296,7 +299,7 @@ func runProcess(ctx context.Context, p *smartaudio.Processor, opts cliOptions) e
 			OutputDuration: duration,
 		}
 	} else {
-		info, err := p.PreconvertToWAV(ctx, opts.input, wavPath, opts.sampleRate)
+		info, err := p.PreconvertToWAV(ctx, opts.input, wavPath, opts.outputSampleRate)
 		if err != nil {
 			return err
 		}

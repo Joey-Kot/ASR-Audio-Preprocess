@@ -746,6 +746,15 @@ static enum AVCodecID sa_codec_id_from_name(const char *codec_name) {
     if (av_strcasecmp(codec_name, "pcm_s16le") == 0) {
         return AV_CODEC_ID_PCM_S16LE;
     }
+    if (av_strcasecmp(codec_name, "pcm_s24le") == 0) {
+        return AV_CODEC_ID_PCM_S24LE;
+    }
+    if (av_strcasecmp(codec_name, "pcm_s32le") == 0) {
+        return AV_CODEC_ID_PCM_S32LE;
+    }
+    if (av_strcasecmp(codec_name, "pcm_f32le") == 0) {
+        return AV_CODEC_ID_PCM_F32LE;
+    }
     if (av_strcasecmp(codec_name, "flac") == 0) {
         return AV_CODEC_ID_FLAC;
     }
@@ -753,6 +762,37 @@ static enum AVCodecID sa_codec_id_from_name(const char *codec_name) {
         return AV_CODEC_ID_AAC;
     }
     return AV_CODEC_ID_NONE;
+}
+
+static enum AVSampleFormat sa_sample_fmt_from_name(const char *sample_format) {
+    if (!sample_format || !*sample_format) return AV_SAMPLE_FMT_NONE;
+    if (av_strcasecmp(sample_format, "s16") == 0 || av_strcasecmp(sample_format, "16") == 0 ||
+        av_strcasecmp(sample_format, "pcm_s16le") == 0) {
+        return AV_SAMPLE_FMT_S16;
+    }
+    if (av_strcasecmp(sample_format, "s24") == 0 || av_strcasecmp(sample_format, "24") == 0 ||
+        av_strcasecmp(sample_format, "pcm_s24le") == 0) {
+        return AV_SAMPLE_FMT_S32;
+    }
+    if (av_strcasecmp(sample_format, "s32") == 0 || av_strcasecmp(sample_format, "32") == 0 ||
+        av_strcasecmp(sample_format, "pcm_s32le") == 0) {
+        return AV_SAMPLE_FMT_S32;
+    }
+    if (av_strcasecmp(sample_format, "f32") == 0 || av_strcasecmp(sample_format, "flt") == 0 ||
+        av_strcasecmp(sample_format, "float") == 0 || av_strcasecmp(sample_format, "pcm_f32le") == 0) {
+        return AV_SAMPLE_FMT_FLT;
+    }
+    enum AVSampleFormat fmt = av_get_sample_fmt(sample_format);
+    return fmt;
+}
+
+static int sa_encoder_supports_sample_fmt(const AVCodec *encoder, enum AVSampleFormat sample_fmt) {
+    if (sample_fmt == AV_SAMPLE_FMT_NONE) return 0;
+    if (!encoder->sample_fmts) return 1;
+    for (const enum AVSampleFormat *fmt = encoder->sample_fmts; *fmt != AV_SAMPLE_FMT_NONE; fmt++) {
+        if (*fmt == sample_fmt) return 1;
+    }
+    return 0;
 }
 
 typedef struct {
@@ -771,7 +811,7 @@ static void sa_close_output(sa_output *out) {
     avcodec_free_context(&out->enc);
 }
 
-static int sa_open_audio_output(const char *out_path, const char *format_name, enum AVCodecID codec_id, int sample_rate, int bit_rate, AVDictionary **mux_opts, sa_output *out) {
+static int sa_open_audio_output(const char *out_path, const char *format_name, enum AVCodecID codec_id, int sample_rate, int bit_rate, const char *sample_format, AVDictionary **mux_opts, sa_output *out) {
     memset(out, 0, sizeof(*out));
     int ret = avformat_alloc_output_context2(&out->fmt, NULL, format_name, out_path);
     if (ret < 0 || !out->fmt) {
@@ -794,7 +834,12 @@ static int sa_open_audio_output(const char *out_path, const char *format_name, e
         return AVERROR(ENOMEM);
     }
     out->enc->sample_rate = sample_rate > 0 ? sample_rate : 16000;
-    out->enc->sample_fmt = encoder->sample_fmts ? encoder->sample_fmts[0] : AV_SAMPLE_FMT_S16;
+    enum AVSampleFormat requested_sample_fmt = sa_sample_fmt_from_name(sample_format);
+    if (requested_sample_fmt != AV_SAMPLE_FMT_NONE && sa_encoder_supports_sample_fmt(encoder, requested_sample_fmt)) {
+        out->enc->sample_fmt = requested_sample_fmt;
+    } else {
+        out->enc->sample_fmt = encoder->sample_fmts ? encoder->sample_fmts[0] : AV_SAMPLE_FMT_S16;
+    }
     av_channel_layout_default(&out->enc->ch_layout, 1);
     out->enc->time_base = (AVRational){1, out->enc->sample_rate};
     if (bit_rate > 0) out->enc->bit_rate = bit_rate;
@@ -986,11 +1031,11 @@ static int sa_format_encoder_filter(char *filter, size_t filter_size, const char
     return 0;
 }
 
-static int sa_render_filter_to_output_ctx(const char *input_path, const char *out_path, const char *format_name, enum AVCodecID codec_id, int sample_rate, int bit_rate, const char *filter_head, const sa_cancel *cancel) {
+static int sa_render_filter_to_output_ctx(const char *input_path, const char *out_path, const char *format_name, enum AVCodecID codec_id, int sample_rate, int bit_rate, const char *sample_format, const char *filter_head, const sa_cancel *cancel) {
     int ret = sa_cancelled(cancel);
     if (ret < 0) return ret;
     sa_output out;
-    ret = sa_open_audio_output(out_path, format_name, codec_id, sample_rate, bit_rate, NULL, &out);
+    ret = sa_open_audio_output(out_path, format_name, codec_id, sample_rate, bit_rate, sample_format, NULL, &out);
     if (ret < 0) {
         sa_close_output(&out);
         return ret;
@@ -1019,12 +1064,12 @@ static int sa_render_filter_to_output_ctx(const char *input_path, const char *ou
 }
 
 static int sa_render_filter_to_output(const char *input_path, const char *out_path, const char *format_name, enum AVCodecID codec_id, int sample_rate, int bit_rate, const char *filter_head) {
-    return sa_render_filter_to_output_ctx(input_path, out_path, format_name, codec_id, sample_rate, bit_rate, filter_head, NULL);
+    return sa_render_filter_to_output_ctx(input_path, out_path, format_name, codec_id, sample_rate, bit_rate, NULL, filter_head, NULL);
 }
 
 int sa_transcode_wav_ctx(const char *input_path, const char *out_path, int sample_rate, sa_cancel_cb cancel_cb, sa_cancel_handle cancel_handle) {
     sa_cancel cancel = {cancel_cb, cancel_handle};
-    return sa_render_filter_to_output_ctx(input_path, out_path, "wav", AV_CODEC_ID_PCM_S16LE, sample_rate > 0 ? sample_rate : 16000, 0, NULL, &cancel);
+    return sa_render_filter_to_output_ctx(input_path, out_path, "wav", AV_CODEC_ID_PCM_S16LE, sample_rate > 0 ? sample_rate : 16000, 0, "s16", NULL, &cancel);
 }
 
 int sa_transcode_wav(const char *input_path, const char *out_path, int sample_rate) {
@@ -1040,7 +1085,7 @@ int sa_export_wav_ctx(const char *input_path, const char *out_path, int64_t star
     snprintf(filter, sizeof(filter), "atrim=start=%.6f:end=%.6f,asetpts=PTS-STARTPTS",
              (double)start_us / 1000000.0, (double)end_us / 1000000.0);
     sa_cancel cancel = {cancel_cb, cancel_handle};
-    return sa_render_filter_to_output_ctx(input_path, out_path, "wav", AV_CODEC_ID_PCM_S16LE, sample_rate > 0 ? sample_rate : 16000, 0, filter, &cancel);
+    return sa_render_filter_to_output_ctx(input_path, out_path, "wav", AV_CODEC_ID_PCM_S16LE, sample_rate > 0 ? sample_rate : 16000, 0, "s16", filter, &cancel);
 }
 
 int sa_export_wav(const char *input_path, const char *out_path, int64_t start_us, int64_t end_us, int sample_rate) {
@@ -1059,7 +1104,7 @@ int sa_render_intervals_wav_ctx(const char *input_path, const char *out_path, co
         snprintf(filter, sizeof(filter), "atrim=start=%.6f:end=%.6f,asetpts=PTS-STARTPTS",
                  (double)intervals[0].start_us / 1000000.0,
                  (double)intervals[0].end_us / 1000000.0);
-        return sa_render_filter_to_output_ctx(input_path, out_path, "wav", AV_CODEC_ID_PCM_S16LE, sample_rate > 0 ? sample_rate : 16000, 0, filter, &cancel);
+        return sa_render_filter_to_output_ctx(input_path, out_path, "wav", AV_CODEC_ID_PCM_S16LE, sample_rate > 0 ? sample_rate : 16000, 0, "s16", filter, &cancel);
     }
     int n = snprintf(filter + used, sizeof(filter) - used, "asplit=outputs=%d", interval_count);
     if (n < 0 || (size_t)n >= sizeof(filter) - used) {
@@ -1105,14 +1150,14 @@ int sa_render_intervals_wav_ctx(const char *input_path, const char *out_path, co
         sa_set_error("filter graph too large");
         return AVERROR(ENOMEM);
     }
-    return sa_render_filter_to_output_ctx(input_path, out_path, "wav", AV_CODEC_ID_PCM_S16LE, sample_rate > 0 ? sample_rate : 16000, 0, filter, &cancel);
+    return sa_render_filter_to_output_ctx(input_path, out_path, "wav", AV_CODEC_ID_PCM_S16LE, sample_rate > 0 ? sample_rate : 16000, 0, "s16", filter, &cancel);
 }
 
 int sa_render_intervals_wav(const char *input_path, const char *out_path, const sa_interval *intervals, int interval_count, int sample_rate) {
     return sa_render_intervals_wav_ctx(input_path, out_path, intervals, interval_count, sample_rate, NULL, 0);
 }
 
-int sa_encode_audio_ctx(const char *wav_path, const char *out_path, int sample_rate, const char *format_name, const char *codec_name, const char *bitrate, sa_cancel_cb cancel_cb, sa_cancel_handle cancel_handle) {
+int sa_encode_audio_ctx(const char *wav_path, const char *out_path, int sample_rate, const char *format_name, const char *codec_name, const char *bitrate, const char *sample_format, sa_cancel_cb cancel_cb, sa_cancel_handle cancel_handle) {
     if (!wav_path || !out_path) {
         sa_set_error("invalid argument");
         return AVERROR(EINVAL);
@@ -1124,15 +1169,15 @@ int sa_encode_audio_ctx(const char *wav_path, const char *out_path, int sample_r
     }
     sa_cancel cancel = {cancel_cb, cancel_handle};
     const char *format = (format_name && *format_name) ? format_name : "ogg";
-    return sa_render_filter_to_output_ctx(wav_path, out_path, format, codec_id, sample_rate > 0 ? sample_rate : 16000, sa_parse_optional_bitrate(bitrate), NULL, &cancel);
+    return sa_render_filter_to_output_ctx(wav_path, out_path, format, codec_id, sample_rate > 0 ? sample_rate : 16000, sa_parse_optional_bitrate(bitrate), sample_format, NULL, &cancel);
 }
 
-int sa_encode_audio(const char *wav_path, const char *out_path, int sample_rate, const char *format_name, const char *codec_name, const char *bitrate) {
-    return sa_encode_audio_ctx(wav_path, out_path, sample_rate, format_name, codec_name, bitrate, NULL, 0);
+int sa_encode_audio(const char *wav_path, const char *out_path, int sample_rate, const char *format_name, const char *codec_name, const char *bitrate, const char *sample_format) {
+    return sa_encode_audio_ctx(wav_path, out_path, sample_rate, format_name, codec_name, bitrate, sample_format, NULL, 0);
 }
 
 int sa_encode_opus_ctx(const char *wav_path, const char *ogg_path, int sample_rate, const char *bitrate, sa_cancel_cb cancel_cb, sa_cancel_handle cancel_handle) {
-    return sa_encode_audio_ctx(wav_path, ogg_path, sample_rate, "ogg", "libopus", bitrate, cancel_cb, cancel_handle);
+    return sa_encode_audio_ctx(wav_path, ogg_path, sample_rate, "ogg", "libopus", bitrate, "s16", cancel_cb, cancel_handle);
 }
 
 int sa_encode_opus(const char *wav_path, const char *ogg_path, int sample_rate, const char *bitrate) {
@@ -1161,7 +1206,7 @@ int sa_split_wav_fixed_ctx(const char *wav_path, const char *out_dir, const char
     av_dict_set(&opts, "segment_time", segment_time, 0);
     av_dict_set(&opts, "segment_format", "wav", 0);
     av_dict_set(&opts, "reset_timestamps", "1", 0);
-    ret = sa_open_audio_output(pattern, "segment", AV_CODEC_ID_PCM_S16LE, sample_rate > 0 ? sample_rate : 16000, 0, &opts, &out);
+    ret = sa_open_audio_output(pattern, "segment", AV_CODEC_ID_PCM_S16LE, sample_rate > 0 ? sample_rate : 16000, 0, "s16", &opts, &out);
     av_dict_free(&opts);
     if (ret < 0) {
         sa_close_output(&out);
@@ -1326,7 +1371,7 @@ static int sa_concat_wav_reencode_ctx(const char **paths, int path_count, const 
         sa_close_input(&first);
     }
     sa_output out;
-    int ret = sa_open_audio_output(out_path, "wav", AV_CODEC_ID_PCM_S16LE, sample_rate, 0, NULL, &out);
+    int ret = sa_open_audio_output(out_path, "wav", AV_CODEC_ID_PCM_S16LE, sample_rate, 0, "s16", NULL, &out);
     if (ret < 0) {
         sa_close_output(&out);
         return ret;
