@@ -249,6 +249,29 @@ func TestRemoveSilenceByFixedSlicesUsesUniqueRunDirectory(t *testing.T) {
 	}
 }
 
+func TestRemoveSilenceByFixedSlicesDoesNotReuseInputBaseForGeneratedNames(t *testing.T) {
+	backend := &fakeBackend{duration: 5 * time.Second}
+	cfg := DefaultConfig()
+	cfg.FixedTrim.TempDir = t.TempDir()
+	p, err := NewProcessor(WithBackend(backend), WithConfig(cfg))
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, _, err = p.RemoveSilenceByFixedSlicesAndMerge(context.Background(), "/tmp/bad'name[0]\n.wav", "/tmp/out.wav")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(backend.concatInputs) == 0 {
+		t.Fatal("expected concat inputs")
+	}
+	for _, path := range backend.concatInputs {
+		name := filepath.Base(path)
+		if !strings.HasPrefix(name, "sa_") || strings.ContainsAny(name, "'[]\n") {
+			t.Fatalf("concat input name=%q is not normalized", name)
+		}
+	}
+}
+
 func TestSplitWAVBySilenceGroupsSkipsFailedSegmentExports(t *testing.T) {
 	backend := &fakeBackend{
 		duration:       10 * time.Second,
@@ -282,6 +305,29 @@ func TestSplitWAVBySilenceGroupsSkipsFailedSegmentExports(t *testing.T) {
 	}
 	if info.SegmentSkipped != 1 {
 		t.Fatalf("segment skipped=%d", info.SegmentSkipped)
+	}
+}
+
+func TestSplitWAVBySilenceGroupsDoesNotReuseInputBaseForGeneratedNames(t *testing.T) {
+	backend := &fakeBackend{duration: 10 * time.Second}
+	cfg := DefaultConfig()
+	cfg.Silence.Padding = 0
+	cfg.Segments.MaxLength = 20 * time.Second
+	cfg.Segments.OutDir = t.TempDir()
+	p, err := NewProcessor(WithBackend(backend), WithConfig(cfg), WithSilencePadding(0))
+	if err != nil {
+		t.Fatal(err)
+	}
+	segments, _, err := p.SplitWAVBySilenceGroups(context.Background(), "/tmp/bad'name[0]\n.wav")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(segments) != 1 {
+		t.Fatalf("segments=%d want 1", len(segments))
+	}
+	name := filepath.Base(segments[0].File)
+	if !strings.HasPrefix(name, "sa_") || strings.ContainsAny(name, "'[]\n") {
+		t.Fatalf("segment file name=%q is not normalized", name)
 	}
 }
 

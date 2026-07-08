@@ -1231,6 +1231,39 @@ int sa_split_wav_fixed(const char *wav_path, const char *out_dir, const char *fi
     return sa_split_wav_fixed_ctx(wav_path, out_dir, filename_prefix, slice_us, sample_rate, paths, path_count, NULL, 0);
 }
 
+static int sa_write_concat_file_line(FILE *list, const char *path) {
+    if (!path) {
+        sa_set_error("concat path is empty");
+        return AVERROR(EINVAL);
+    }
+    if (strchr(path, '\n') || strchr(path, '\r')) {
+        sa_set_error("concat path contains a line break");
+        return AVERROR(EINVAL);
+    }
+    if (fputs("file '", list) == EOF) {
+        sa_set_error("write concat list failed: %s", strerror(errno));
+        return AVERROR(errno);
+    }
+    for (const char *p = path; *p; p++) {
+        if (*p == '\'') {
+            if (fputs("'\\''", list) == EOF) {
+                sa_set_error("write concat list failed: %s", strerror(errno));
+                return AVERROR(errno);
+            }
+            continue;
+        }
+        if (fputc((unsigned char)*p, list) == EOF) {
+            sa_set_error("write concat list failed: %s", strerror(errno));
+            return AVERROR(errno);
+        }
+    }
+    if (fputs("'\n", list) == EOF) {
+        sa_set_error("write concat list failed: %s", strerror(errno));
+        return AVERROR(errno);
+    }
+    return 0;
+}
+
 static int sa_concat_wav_copy_ctx(const char **paths, int path_count, const char *out_path, const sa_cancel *cancel) {
     char list_path[4096];
     snprintf(list_path, sizeof(list_path), "%s.concat_list.txt", out_path);
@@ -1240,7 +1273,12 @@ static int sa_concat_wav_copy_ctx(const char **paths, int path_count, const char
         return AVERROR(errno);
     }
     for (int i = 0; i < path_count; i++) {
-        fprintf(list, "file '%s'\n", paths[i]);
+        int write_ret = sa_write_concat_file_line(list, paths[i]);
+        if (write_ret < 0) {
+            fclose(list);
+            unlink(list_path);
+            return write_ret;
+        }
     }
     fclose(list);
 

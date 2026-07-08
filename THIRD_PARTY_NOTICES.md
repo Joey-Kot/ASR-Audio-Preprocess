@@ -4,8 +4,8 @@ This project builds and links FFmpeg/libav and Opus from source.
 
 ## FFmpeg
 
-- Version: 7.1.1
-- Source: FFmpeg official release tarball
+- Version: 8.1.2
+- Source: FFmpeg official release tarball, verified with the FFmpeg release PGP signature
 - License: LGPL-2.1-or-later / GPL-2.0-or-later depending on enabled components
 - Build configuration: see `scripts/bootstrap-static-audio-deps.sh`
 

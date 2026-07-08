@@ -16,7 +16,6 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
-	"strings"
 	"sync"
 	"time"
 )
@@ -97,8 +96,7 @@ func (p *Processor) TrimLongSilencesFromWAV(ctx context.Context, wavPath, outWAV
 		return "", info, nil
 	}
 	if outWAVPath == "" {
-		ext := filepath.Ext(wavPath)
-		outWAVPath = strings.TrimSuffix(wavPath, ext) + "_nosilence.wav"
+		outWAVPath = filepath.Join(filepath.Dir(wavPath), newWorkFileStem()+"_nosilence.wav")
 	}
 	if err := p.backend.RenderIntervalsToWAV(ctx, wavPath, outWAVPath, intervals, p.cfg.Segments.OutputSampleRate); err != nil {
 		return wavPath, info, err
@@ -146,7 +144,7 @@ func (p *Processor) SplitWAVBySilenceGroups(ctx context.Context, wavPath string)
 	if err := os.MkdirAll(outDir, 0o755); err != nil {
 		return nil, info, err
 	}
-	base := strings.TrimSuffix(filepath.Base(wavPath), filepath.Ext(wavPath))
+	base := newWorkFileStem()
 	segments := make([]Segment, 0, len(groups))
 	preserveInternalSilence := boolValue(p.cfg.Segments.PreserveInternalSilence, true)
 	output := p.cfg.Segments.audioOutput()
@@ -219,8 +217,7 @@ func (p *Processor) RemoveSilenceByFixedSlicesAndMerge(ctx context.Context, wavP
 	}
 	info.InputDuration = duration
 	if outMergedWAV == "" {
-		ext := filepath.Ext(wavPath)
-		outMergedWAV = strings.TrimSuffix(wavPath, ext) + "_sliced_merged.wav"
+		outMergedWAV = filepath.Join(filepath.Dir(wavPath), newWorkFileStem()+"_sliced_merged.wav")
 	}
 	tempRoot := cfg.FixedTrim.TempDir
 	cleanupTempRoot := false
@@ -252,7 +249,7 @@ func (p *Processor) RemoveSilenceByFixedSlicesAndMerge(ctx context.Context, wavP
 	if err := os.MkdirAll(trimmedDir, 0o755); err != nil {
 		return wavPath, info, err
 	}
-	base := strings.TrimSuffix(filepath.Base(wavPath), filepath.Ext(wavPath))
+	base := newWorkFileStem()
 	slicePaths, err := p.backend.SplitWAVFixed(ctx, wavPath, sliceDir, base+"_slice", cfg.FixedTrim.SliceLength, cfg.Segments.OutputSampleRate)
 	if err != nil {
 		return wavPath, info, err

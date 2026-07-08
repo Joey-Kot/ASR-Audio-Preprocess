@@ -13,6 +13,8 @@ package main
 
 import (
 	"context"
+	"crypto/rand"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"flag"
@@ -20,7 +22,6 @@ import (
 	"os"
 	"path/filepath"
 	"strconv"
-	"strings"
 	"time"
 
 	smartaudio "github.com/Joey-Kot/ASR-Audio-Preprocess"
@@ -181,9 +182,6 @@ func buildConfig(opts cliOptions) (smartaudio.Config, error) {
 	cfg.Segments.OutputBitrate = opts.outputBitrate
 	cfg.Segments.OutputSampleFormat = opts.outputSampleFormat
 	cfg.Segments.OutDir = opts.outDir
-	if opts.mode == "process" && cfg.Segments.OutDir == "" {
-		cfg.Segments.OutDir = filepath.Join(filepath.Dir(opts.input), "out_segments")
-	}
 	if opts.workDir != "" {
 		cfg.FixedTrim.TempDir = opts.workDir
 	}
@@ -274,7 +272,16 @@ func runProcess(ctx context.Context, p *smartaudio.Processor, opts cliOptions) e
 		return err
 	}
 
-	base := strings.TrimSuffix(filepath.Base(opts.input), filepath.Ext(opts.input))
+	base := newCLIWorkFileStem()
+	if p.Config().Segments.OutDir == "" {
+		cfg := p.Config()
+		cfg.Segments.OutDir = filepath.Join(filepath.Dir(opts.input), base+"_segments")
+		var err error
+		p, err = smartaudio.NewProcessor(smartaudio.WithConfig(cfg))
+		if err != nil {
+			return err
+		}
+	}
 	wavPath := opts.wav
 	if wavPath == "" {
 		wavPath = filepath.Join(workDir, base+".wav")
@@ -286,25 +293,11 @@ func runProcess(ctx context.Context, p *smartaudio.Processor, opts cliOptions) e
 
 	var preInfo smartaudio.ProcessingInfo
 	processInput := wavPath
-	if strings.EqualFold(filepath.Ext(opts.input), ".wav") && opts.wav == "" {
-		processInput = opts.input
-		duration, err := p.ProbeDuration(ctx, opts.input, smartaudio.ProbeWAVFirst)
-		if err != nil {
-			return err
-		}
-		preInfo = smartaudio.ProcessingInfo{
-			InputPath:      opts.input,
-			OutputPath:     opts.input,
-			InputDuration:  duration,
-			OutputDuration: duration,
-		}
-	} else {
-		info, err := p.PreconvertToWAV(ctx, opts.input, wavPath, opts.outputSampleRate)
-		if err != nil {
-			return err
-		}
-		preInfo = info
+	info, err := p.PreconvertToWAV(ctx, opts.input, processInput, opts.outputSampleRate)
+	if err != nil {
+		return err
 	}
+	preInfo = info
 
 	merged, trimInfo, err := p.RemoveSilenceByFixedSlicesAndMerge(ctx, processInput, mergedPath)
 	if err != nil {
@@ -331,7 +324,7 @@ func runProcess(ctx context.Context, p *smartaudio.Processor, opts cliOptions) e
 	if err != nil {
 		return err
 	}
-	info := combineProcessInfo(opts.input, splitInfo.OutputPath, preInfo, trimInfo, splitInfo)
+	info = combineProcessInfo(opts.input, splitInfo.OutputPath, preInfo, trimInfo, splitInfo)
 	return writeJSON(cliResult{
 		Mode:       opts.mode,
 		OutputPath: splitInfo.OutputPath,
@@ -374,6 +367,14 @@ func parseOptionalBool(value string) (*bool, error) {
 		return nil, err
 	}
 	return smartaudio.Bool(parsed), nil
+}
+
+func newCLIWorkFileStem() string {
+	var b [8]byte
+	if _, err := rand.Read(b[:]); err == nil {
+		return "sa_" + hex.EncodeToString(b[:])
+	}
+	return "sa_" + strconv.FormatInt(time.Now().UTC().UnixNano(), 36)
 }
 
 func writeJSON(result cliResult) error {
