@@ -147,8 +147,8 @@ func DefaultConfig() Config {
 			OutputCodec:             DefaultOutputCodec,
 			OutputBitrate:           DefaultOutputBitrate,
 			OutputSampleFormat:      DefaultOutputSampleFormat,
-			KeepTempWAV:             boolPtr(true),
-			PreserveInternalSilence: boolPtr(true),
+			KeepTempWAV:             Bool(true),
+			PreserveInternalSilence: Bool(true),
 		},
 		Libav: LibavConfig{
 			CodecThreads: DefaultLibavCodecThreads,
@@ -231,10 +231,6 @@ func (c Config) normalized() Config {
 }
 
 func Bool(v bool) *bool {
-	return &v
-}
-
-func boolPtr(v bool) *bool {
 	return &v
 }
 
