@@ -16,9 +16,11 @@ package smartaudio
 import (
 	"context"
 	"encoding/binary"
+	"fmt"
 	"math"
 	"os"
 	"path/filepath"
+	"sync"
 	"testing"
 	"time"
 )
@@ -207,6 +209,115 @@ func TestLibavRemoveSilenceByFixedSlicesAndMerge(t *testing.T) {
 	}
 }
 
+func TestLibavSilenceDetectRunsConcurrently(t *testing.T) {
+	dir := t.TempDir()
+	input := filepath.Join(dir, "input.wav")
+	writeTestWAV(t, input)
+
+	p, err := NewProcessor()
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	const workers = 8
+	errs := make(chan error, workers)
+	var wg sync.WaitGroup
+	for i := 0; i < workers; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			silences, err := p.backend.SilenceDetect(context.Background(), input, -30, 700*time.Millisecond)
+			if err != nil {
+				errs <- err
+				return
+			}
+			if err := expectTestWAVSilences(silences); err != nil {
+				errs <- err
+			}
+		}()
+	}
+	wg.Wait()
+	close(errs)
+
+	for err := range errs {
+		if err != nil {
+			t.Fatal(err)
+		}
+	}
+}
+
+func TestLibavVolumeDetectRunsConcurrently(t *testing.T) {
+	dir := t.TempDir()
+	input := filepath.Join(dir, "input.wav")
+	writeTestWAV(t, input)
+
+	p, err := NewProcessor()
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	const workers = 8
+	errs := make(chan error, workers)
+	var wg sync.WaitGroup
+	for i := 0; i < workers; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			stats, err := p.backend.VolumeDetect(context.Background(), input)
+			if err != nil {
+				errs <- err
+				return
+			}
+			if !stats.Valid || !stats.HasMean || !stats.HasMax {
+				errs <- fmt.Errorf("stats=%#v should be valid with mean and max", stats)
+				return
+			}
+			const amplitude = 12000.0 / 32768.0
+			wantMax := 20 * math.Log10(amplitude)
+			wantMean := 10 * math.Log10((amplitude*amplitude)/6)
+			if math.Abs(stats.MaxDB-wantMax) > 0.2 || math.Abs(stats.MeanDB-wantMean) > 0.2 {
+				errs <- fmt.Errorf("stats mean=%f max=%f want about mean=%f max=%f", stats.MeanDB, stats.MaxDB, wantMean, wantMax)
+			}
+		}()
+	}
+	wg.Wait()
+	close(errs)
+
+	for err := range errs {
+		if err != nil {
+			t.Fatal(err)
+		}
+	}
+}
+
+func TestLibavSilenceDetectIncludesExactMinimumFiniteSilence(t *testing.T) {
+	dir := t.TempDir()
+	input := filepath.Join(dir, "input.wav")
+	writePatternTestWAV(t, input, 3, func(i, sampleRate int) int16 {
+		if i >= sampleRate && i < sampleRate+sampleRate*7/10 {
+			return 0
+		}
+		phase := 2 * math.Pi * 440 * float64(i) / float64(sampleRate)
+		return int16(math.Sin(phase) * 12000)
+	})
+
+	p, err := NewProcessor()
+	if err != nil {
+		t.Fatal(err)
+	}
+	silences, err := p.backend.SilenceDetect(context.Background(), input, -30, 700*time.Millisecond)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(silences) != 1 {
+		t.Fatalf("silences=%#v want 1 interval", silences)
+	}
+	if !durationNear(silences[0].Start, time.Second, 30*time.Millisecond) ||
+		!durationNear(silences[0].End, 1700*time.Millisecond, 30*time.Millisecond) {
+		t.Fatalf("silence=%s-%s want about 1s-1.7s", silences[0].Start, silences[0].End)
+	}
+}
+
 func writeTwoSpeechIntervalTestWAV(t *testing.T, path string) {
 	t.Helper()
 	writePatternTestWAV(t, path, 3, func(i, sampleRate int) int16 {
@@ -216,6 +327,30 @@ func writeTwoSpeechIntervalTestWAV(t *testing.T, path string) {
 		}
 		return 0
 	})
+}
+
+func expectTestWAVSilences(silences []Interval) error {
+	if len(silences) != 2 {
+		return fmt.Errorf("silences=%#v want 2 intervals", silences)
+	}
+	expected := []Interval{
+		{Start: 0, End: time.Second},
+		{Start: 2 * time.Second, End: 3 * time.Second},
+	}
+	for i, want := range expected {
+		if !durationNear(silences[i].Start, want.Start, 30*time.Millisecond) ||
+			!durationNear(silences[i].End, want.End, 30*time.Millisecond) {
+			return fmt.Errorf("silence[%d]=%s-%s want about %s-%s", i, silences[i].Start, silences[i].End, want.Start, want.End)
+		}
+	}
+	return nil
+}
+
+func durationNear(got, want, tolerance time.Duration) bool {
+	if got < want {
+		return want-got <= tolerance
+	}
+	return got-want <= tolerance
 }
 
 func writeTestWAV(t *testing.T, path string) {

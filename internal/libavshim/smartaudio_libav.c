@@ -11,10 +11,8 @@
 
 #ifdef _WIN32
 #include <io.h>
-#include <windows.h>
 #else
 #include <glob.h>
-#include <pthread.h>
 #endif
 
 #include <libavcodec/avcodec.h>
@@ -542,32 +540,23 @@ static int sa_decode_filter_run(const char *path, const char *filter_desc, sa_fr
 }
 
 typedef struct {
-    double mean_db;
-    double max_db;
-    int has_mean;
-    int has_max;
+    double sum_square;
+    double max_abs;
+    uint64_t sample_count;
 } sa_volume_capture;
 
 typedef struct {
     sa_interval *items;
     int count;
     int cap;
-    int64_t *starts;
-    int start_count;
-    int start_cap;
+    int64_t min_silence_us;
+    double noise_threshold;
+    int has_pending_silence;
+    int pending_reported;
+    int64_t pending_start_us;
+    int64_t last_frame_end_us;
+    int64_t next_sample_us;
 } sa_silence_capture;
-
-static int sa_push_i64(int64_t **items, int *count, int *cap, int64_t value) {
-    if (*count >= *cap) {
-        int next = *cap ? *cap * 2 : 8;
-        int64_t *p = av_realloc_array(*items, next, sizeof(**items));
-        if (!p) return AVERROR(ENOMEM);
-        *items = p;
-        *cap = next;
-    }
-    (*items)[(*count)++] = value;
-    return 0;
-}
 
 static int sa_push_interval(sa_silence_capture *cap, int64_t start_us, int64_t end_us) {
     if (cap->count >= cap->cap) {
@@ -581,77 +570,35 @@ static int sa_push_interval(sa_silence_capture *cap, int64_t start_us, int64_t e
     return 0;
 }
 
-#ifdef _WIN32
-static SRWLOCK sa_log_mutex = SRWLOCK_INIT;
-
-static void sa_log_lock(void) {
-    AcquireSRWLockExclusive(&sa_log_mutex);
-}
-
-static void sa_log_unlock(void) {
-    ReleaseSRWLockExclusive(&sa_log_mutex);
-}
-#else
-static pthread_mutex_t sa_log_mutex = PTHREAD_MUTEX_INITIALIZER;
-
-static void sa_log_lock(void) {
-    pthread_mutex_lock(&sa_log_mutex);
-}
-
-static void sa_log_unlock(void) {
-    pthread_mutex_unlock(&sa_log_mutex);
-}
-#endif
-
-static sa_volume_capture *sa_current_volume = NULL;
-static sa_silence_capture *sa_current_silence = NULL;
-
-static void sa_volume_log_callback(void *ptr, int level, const char *fmt, va_list vl) {
-    (void)ptr;
-    (void)level;
-    char line[1024];
-    va_list parse_args;
-    va_copy(parse_args, vl);
-    vsnprintf(line, sizeof(line), fmt, parse_args);
-    va_end(parse_args);
-    if (sa_current_volume) {
-        double v = 0.0;
-        if (sscanf(line, " mean_volume: %lf dB", &v) == 1 || sscanf(line, "mean_volume: %lf dB", &v) == 1) {
-            sa_current_volume->mean_db = v;
-            sa_current_volume->has_mean = 1;
-        }
-        if (sscanf(line, " max_volume: %lf dB", &v) == 1 || sscanf(line, "max_volume: %lf dB", &v) == 1) {
-            sa_current_volume->max_db = v;
-            sa_current_volume->has_max = 1;
-        }
+static int sa_close_pending_silence(sa_silence_capture *cap) {
+    if (!cap || !cap->has_pending_silence) return 0;
+    if (cap->last_frame_end_us > cap->pending_start_us &&
+        (cap->pending_reported || cap->last_frame_end_us - cap->pending_start_us >= cap->min_silence_us)) {
+        int ret = sa_push_interval(cap, cap->pending_start_us, cap->last_frame_end_us);
+        if (ret < 0) return ret;
     }
+    cap->has_pending_silence = 0;
+    cap->pending_reported = 0;
+    return 0;
 }
 
-static void sa_silence_log_callback(void *ptr, int level, const char *fmt, va_list vl) {
-    (void)ptr;
-    (void)level;
-    char line[1024];
-    va_list parse_args;
-    va_copy(parse_args, vl);
-    vsnprintf(line, sizeof(line), fmt, parse_args);
-    va_end(parse_args);
-    if (!sa_current_silence) return;
-    double value = 0.0;
-    char *start = strstr(line, "silence_start:");
-    if (start && sscanf(start, "silence_start: %lf", &value) == 1) {
-        sa_push_i64(&sa_current_silence->starts, &sa_current_silence->start_count, &sa_current_silence->start_cap,
-                    (int64_t)llround(value * 1000000.0));
-        return;
+static int sa_volume_sample_cb(AVFrame *frame, void *opaque) {
+    sa_volume_capture *cap = (sa_volume_capture *)opaque;
+    if (!frame || !cap || frame->nb_samples <= 0) return 0;
+    if (frame->format != AV_SAMPLE_FMT_DBL && frame->format != AV_SAMPLE_FMT_DBLP) {
+        sa_set_error("volume sample format mismatch");
+        return AVERROR(EINVAL);
     }
-    char *end = strstr(line, "silence_end:");
-    if (end && sscanf(end, "silence_end: %lf", &value) == 1 && sa_current_silence->start_count > 0) {
-        int64_t end_us = (int64_t)llround(value * 1000000.0);
-        int64_t start_us = sa_current_silence->starts[0];
-        memmove(sa_current_silence->starts, sa_current_silence->starts + 1,
-                sizeof(int64_t) * (sa_current_silence->start_count - 1));
-        sa_current_silence->start_count--;
-        sa_push_interval(sa_current_silence, start_us, end_us);
+    const double *samples = (const double *)frame->extended_data[0];
+    for (int i = 0; i < frame->nb_samples; i++) {
+        double sample = samples[i];
+        if (!isfinite(sample)) continue;
+        double abs_sample = fabs(sample);
+        cap->sum_square += sample * sample;
+        if (abs_sample > cap->max_abs) cap->max_abs = abs_sample;
+        cap->sample_count++;
     }
+    return 0;
 }
 
 int sa_volume_detect_with_threads_ctx(const char *path, double *mean_db, double *max_db, int codec_threads, sa_cancel_cb cancel_cb, sa_cancel_handle cancel_handle) {
@@ -661,23 +608,16 @@ int sa_volume_detect_with_threads_ctx(const char *path, double *mean_db, double 
     }
     sa_cancel cancel = {cancel_cb, cancel_handle};
     sa_volume_capture cap = {0};
-    sa_log_lock();
-    int old_level = av_log_get_level();
-    av_log_set_level(AV_LOG_INFO);
-    sa_current_volume = &cap;
-    av_log_set_callback(sa_volume_log_callback);
-    int ret = sa_decode_filter_run_with_threads_ctx(path, "volumedetect", NULL, NULL, &cancel, codec_threads);
-    av_log_set_callback(av_log_default_callback);
-    av_log_set_level(old_level);
-    sa_current_volume = NULL;
-    sa_log_unlock();
+    char filter[256];
+    snprintf(filter, sizeof(filter), "aformat=sample_fmts=dbl:channel_layouts=mono");
+    int ret = sa_decode_filter_run_with_threads_ctx(path, filter, sa_volume_sample_cb, &cap, &cancel, codec_threads);
     if (ret < 0) return ret;
-    if (!cap.has_mean && !cap.has_max) {
-        sa_set_error("volumedetect did not report mean_volume/max_volume");
+    if (cap.sample_count == 0) {
+        sa_set_error("volumedetect did not process any samples");
         return AVERROR(EINVAL);
     }
-    *mean_db = cap.has_mean ? cap.mean_db : NAN;
-    *max_db = cap.has_max ? cap.max_db : NAN;
+    *mean_db = cap.sum_square > 0.0 ? 10.0 * log10(cap.sum_square / (double)cap.sample_count) : -INFINITY;
+    *max_db = cap.max_abs > 0.0 ? 20.0 * log10(cap.max_abs) : -INFINITY;
     return 0;
 }
 
@@ -689,23 +629,42 @@ int sa_volume_detect(const char *path, double *mean_db, double *max_db) {
     return sa_volume_detect_ctx(path, mean_db, max_db, NULL, 0);
 }
 
-static int sa_silence_frame_cb(AVFrame *frame, void *opaque) {
+static int sa_silence_sample_cb(AVFrame *frame, void *opaque) {
     sa_silence_capture *cap = (sa_silence_capture *)opaque;
-    AVDictionaryEntry *e = NULL;
-    e = av_dict_get(frame->metadata, "lavfi.silence_start", NULL, 0);
-    if (e && e->value) {
-        double seconds = strtod(e->value, NULL);
-        int ret = sa_push_i64(&cap->starts, &cap->start_count, &cap->start_cap, (int64_t)llround(seconds * 1000000.0));
-        if (ret < 0) return ret;
+    if (!frame || !cap || frame->nb_samples <= 0) return 0;
+    if (frame->format != AV_SAMPLE_FMT_DBL && frame->format != AV_SAMPLE_FMT_DBLP) {
+        sa_set_error("silence sample format mismatch");
+        return AVERROR(EINVAL);
     }
-    e = av_dict_get(frame->metadata, "lavfi.silence_end", NULL, 0);
-    if (e && e->value && cap->start_count > 0) {
-        double seconds = strtod(e->value, NULL);
-        int64_t end_us = (int64_t)llround(seconds * 1000000.0);
-        int64_t start_us = cap->starts[0];
-        memmove(cap->starts, cap->starts + 1, sizeof(int64_t) * (cap->start_count - 1));
-        cap->start_count--;
-        return sa_push_interval(cap, start_us, end_us);
+    int sample_rate = frame->sample_rate > 0 ? frame->sample_rate : 16000;
+    int64_t frame_start_us = cap->next_sample_us;
+    int64_t frame_duration_us = av_rescale_q(frame->nb_samples, (AVRational){1, sample_rate}, AV_TIME_BASE_Q);
+    cap->last_frame_end_us = frame_start_us + frame_duration_us;
+    cap->next_sample_us = cap->last_frame_end_us;
+
+    const double *samples = (const double *)frame->extended_data[0];
+    for (int i = 0; i < frame->nb_samples; i++) {
+        double sample = samples[i];
+        int silent = !isnan(sample) && fabs(sample) <= cap->noise_threshold;
+        int64_t ts_us = frame_start_us + av_rescale_q(i, (AVRational){1, sample_rate}, AV_TIME_BASE_Q);
+        if (silent) {
+            if (!cap->has_pending_silence) {
+                cap->has_pending_silence = 1;
+                cap->pending_reported = 0;
+                cap->pending_start_us = ts_us;
+            } else if (!cap->pending_reported && ts_us - cap->pending_start_us >= cap->min_silence_us) {
+                cap->pending_reported = 1;
+            }
+            continue;
+        }
+        if (cap->has_pending_silence) {
+            if (cap->pending_reported || ts_us - cap->pending_start_us >= cap->min_silence_us) {
+                int ret = sa_push_interval(cap, cap->pending_start_us, ts_us);
+                if (ret < 0) return ret;
+            }
+            cap->has_pending_silence = 0;
+            cap->pending_reported = 0;
+        }
     }
     return 0;
 }
@@ -719,20 +678,14 @@ int sa_silence_detect_with_threads_ctx(const char *path, double noise_db, int64_
     *interval_count = 0;
     if (min_silence_us < 1000) min_silence_us = 1000;
     char filter[256];
-    snprintf(filter, sizeof(filter), "silencedetect=noise=%gdB:d=%.6f", noise_db, (double)min_silence_us / 1000000.0);
+    snprintf(filter, sizeof(filter), "aformat=sample_fmts=dbl:channel_layouts=mono");
     sa_cancel cancel = {cancel_cb, cancel_handle};
-    sa_silence_capture cap = {0};
-    sa_log_lock();
-    int old_level = av_log_get_level();
-    av_log_set_level(AV_LOG_INFO);
-    sa_current_silence = &cap;
-    av_log_set_callback(sa_silence_log_callback);
-    int ret = sa_decode_filter_run_with_threads_ctx(path, filter, NULL, NULL, &cancel, codec_threads);
-    av_log_set_callback(av_log_default_callback);
-    av_log_set_level(old_level);
-    sa_current_silence = NULL;
-    sa_log_unlock();
-    av_free(cap.starts);
+    sa_silence_capture cap = {
+        .min_silence_us = min_silence_us,
+        .noise_threshold = pow(10.0, noise_db / 20.0),
+    };
+    int ret = sa_decode_filter_run_with_threads_ctx(path, filter, sa_silence_sample_cb, &cap, &cancel, codec_threads);
+    if (ret >= 0) ret = sa_close_pending_silence(&cap);
     if (ret < 0) {
         av_free(cap.items);
         return ret;
