@@ -44,6 +44,7 @@ type cliOptions struct {
 	fixedSliceLength        time.Duration
 	fixedSliceWorkers       int
 	segmentWorkers          int
+	libavCodecThreads       int
 	maxSegmentLength        time.Duration
 	keepTempWAV             string
 	preserveInternalSilence string
@@ -136,6 +137,7 @@ func parseFlags() cliOptions {
 	flag.DurationVar(&opts.fixedSliceLength, "fixed-slice-length", smartaudio.DefaultFixedSliceLength, "fixed slice length, for example 5s")
 	flag.IntVar(&opts.fixedSliceWorkers, "fixed-slice-workers", smartaudio.DefaultFixedSliceWorkers, "fixed slice worker count")
 	flag.IntVar(&opts.segmentWorkers, "segment-workers", smartaudio.DefaultSegmentWorkers, "ASR segment export and encode worker count; 0 means auto")
+	flag.IntVar(&opts.libavCodecThreads, "libav-codec-threads", smartaudio.DefaultLibavCodecThreads, "libav decoder/encoder thread count per pipeline; 0 means libav default")
 	flag.DurationVar(&opts.maxSegmentLength, "max-segment-length", smartaudio.DefaultMaxSegmentLength, "maximum ASR segment span, for example 3m")
 	flag.StringVar(&opts.keepTempWAV, "keep-temp-wav", "", "whether split mode keeps temp WAV paths in results: true or false")
 	flag.StringVar(&opts.preserveInternalSilence, "preserve-internal-silence", "", "whether split mode preserves internal silence: true or false")
@@ -178,6 +180,7 @@ func buildConfig(opts cliOptions) (smartaudio.Config, error) {
 	cfg.FixedTrim.SliceLength = opts.fixedSliceLength
 	cfg.FixedTrim.Workers = opts.fixedSliceWorkers
 	cfg.Segments.Workers = opts.segmentWorkers
+	cfg.Libav.CodecThreads = opts.libavCodecThreads
 	cfg.Segments.MaxLength = opts.maxSegmentLength
 	cfg.Segments.OutputSampleRate = opts.outputSampleRate
 	cfg.Segments.OutputFormat = opts.outputFormat

@@ -24,6 +24,10 @@ type Processor struct {
 	backend Backend
 }
 
+type configurableBackend interface {
+	withConfig(Config) Backend
+}
+
 func NewProcessor(opts ...Option) (*Processor, error) {
 	p := &Processor{
 		cfg:     DefaultConfig(),
@@ -31,6 +35,9 @@ func NewProcessor(opts ...Option) (*Processor, error) {
 	}
 	for _, opt := range opts {
 		opt(p)
+	}
+	if backend, ok := p.backend.(configurableBackend); ok {
+		p.backend = backend.withConfig(p.cfg)
 	}
 	if p.backend == nil {
 		return nil, ErrNoBackend

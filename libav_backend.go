@@ -30,7 +30,9 @@ import (
 	"unsafe"
 )
 
-type LibavBackend struct{}
+type LibavBackend struct {
+	codecThreads int
+}
 
 func defaultBackend() Backend {
 	return LibavBackend{}
@@ -38,6 +40,11 @@ func defaultBackend() Backend {
 
 func NewLibavBackend() Backend {
 	return LibavBackend{}
+}
+
+func (b LibavBackend) withConfig(cfg Config) Backend {
+	b.codecThreads = cfg.Libav.CodecThreads
+	return b
 }
 
 func libavCancel(ctx context.Context) (C.sa_cancel_cb, C.sa_cancel_handle, func()) {
@@ -57,7 +64,7 @@ func contextErr(ctx context.Context) error {
 	return ctx.Err()
 }
 
-func (LibavBackend) ProbeDuration(ctx context.Context, path string, order ProbeOrder) (time.Duration, error) {
+func (b LibavBackend) ProbeDuration(ctx context.Context, path string, order ProbeOrder) (time.Duration, error) {
 	if err := contextErr(ctx); err != nil {
 		return 0, err
 	}
@@ -70,7 +77,7 @@ func (LibavBackend) ProbeDuration(ctx context.Context, path string, order ProbeO
 	if order == ProbeWAVFirst {
 		mediaFirst = 0
 	}
-	if rc := C.sa_probe_duration_ctx(cPath, mediaFirst, &out, cancelCB, cancelHandle); rc != 0 {
+	if rc := C.sa_probe_duration_with_threads_ctx(cPath, mediaFirst, &out, C.int(b.codecThreads), cancelCB, cancelHandle); rc != 0 {
 		if err := contextErr(ctx); err != nil {
 			return 0, err
 		}
@@ -82,7 +89,7 @@ func (LibavBackend) ProbeDuration(ctx context.Context, path string, order ProbeO
 	return time.Duration(out) * time.Microsecond, nil
 }
 
-func (LibavBackend) VolumeDetect(ctx context.Context, path string) (VolumeStats, error) {
+func (b LibavBackend) VolumeDetect(ctx context.Context, path string) (VolumeStats, error) {
 	if err := contextErr(ctx); err != nil {
 		return VolumeStats{}, err
 	}
@@ -92,7 +99,7 @@ func (LibavBackend) VolumeDetect(ctx context.Context, path string) (VolumeStats,
 	defer releaseCancel()
 	var mean C.double
 	var max C.double
-	if rc := C.sa_volume_detect_ctx(cPath, &mean, &max, cancelCB, cancelHandle); rc != 0 {
+	if rc := C.sa_volume_detect_with_threads_ctx(cPath, &mean, &max, C.int(b.codecThreads), cancelCB, cancelHandle); rc != 0 {
 		if err := contextErr(ctx); err != nil {
 			return VolumeStats{}, err
 		}
@@ -104,7 +111,7 @@ func (LibavBackend) VolumeDetect(ctx context.Context, path string) (VolumeStats,
 	return VolumeStats{MeanDB: float64(mean), MaxDB: float64(max), HasMean: true, HasMax: true, Valid: true}, nil
 }
 
-func (LibavBackend) SilenceDetect(ctx context.Context, path string, noiseDB float64, minSilence time.Duration) ([]Interval, error) {
+func (b LibavBackend) SilenceDetect(ctx context.Context, path string, noiseDB float64, minSilence time.Duration) ([]Interval, error) {
 	if err := contextErr(ctx); err != nil {
 		return nil, err
 	}
@@ -114,7 +121,7 @@ func (LibavBackend) SilenceDetect(ctx context.Context, path string, noiseDB floa
 	defer releaseCancel()
 	var cIntervals *C.sa_interval
 	var cCount C.int
-	if rc := C.sa_silence_detect_ctx(cPath, C.double(noiseDB), C.int64_t(minSilence/time.Microsecond), &cIntervals, &cCount, cancelCB, cancelHandle); rc != 0 {
+	if rc := C.sa_silence_detect_with_threads_ctx(cPath, C.double(noiseDB), C.int64_t(minSilence/time.Microsecond), &cIntervals, &cCount, C.int(b.codecThreads), cancelCB, cancelHandle); rc != 0 {
 		if err := contextErr(ctx); err != nil {
 			return nil, err
 		}
@@ -139,7 +146,7 @@ func (LibavBackend) SilenceDetect(ctx context.Context, path string, noiseDB floa
 	return out, nil
 }
 
-func (LibavBackend) TranscodeToWAV(ctx context.Context, inputPath, wavPath string, sampleRate int) error {
+func (b LibavBackend) TranscodeToWAV(ctx context.Context, inputPath, wavPath string, sampleRate int) error {
 	if err := contextErr(ctx); err != nil {
 		return err
 	}
@@ -148,7 +155,7 @@ func (LibavBackend) TranscodeToWAV(ctx context.Context, inputPath, wavPath strin
 	defer C.free(unsafe.Pointer(cOut))
 	cancelCB, cancelHandle, releaseCancel := libavCancel(ctx)
 	defer releaseCancel()
-	if rc := C.sa_transcode_wav_ctx(cInput, cOut, C.int(sampleRate), cancelCB, cancelHandle); rc != 0 {
+	if rc := C.sa_transcode_wav_with_threads_ctx(cInput, cOut, C.int(sampleRate), C.int(b.codecThreads), cancelCB, cancelHandle); rc != 0 {
 		if err := contextErr(ctx); err != nil {
 			return err
 		}
@@ -157,7 +164,7 @@ func (LibavBackend) TranscodeToWAV(ctx context.Context, inputPath, wavPath strin
 	return contextErr(ctx)
 }
 
-func (LibavBackend) SplitWAVFixed(ctx context.Context, wavPath, outDir, filenamePrefix string, sliceLength time.Duration, sampleRate int) ([]string, error) {
+func (b LibavBackend) SplitWAVFixed(ctx context.Context, wavPath, outDir, filenamePrefix string, sliceLength time.Duration, sampleRate int) ([]string, error) {
 	if err := contextErr(ctx); err != nil {
 		return nil, err
 	}
@@ -169,7 +176,7 @@ func (LibavBackend) SplitWAVFixed(ctx context.Context, wavPath, outDir, filename
 	defer releaseCancel()
 	var cPaths **C.char
 	var cCount C.int
-	if rc := C.sa_split_wav_fixed_ctx(cWAV, cOutDir, cPrefix, C.int64_t(sliceLength/time.Microsecond), C.int(sampleRate), &cPaths, &cCount, cancelCB, cancelHandle); rc != 0 {
+	if rc := C.sa_split_wav_fixed_with_threads_ctx(cWAV, cOutDir, cPrefix, C.int64_t(sliceLength/time.Microsecond), C.int(sampleRate), &cPaths, &cCount, C.int(b.codecThreads), cancelCB, cancelHandle); rc != 0 {
 		if err := contextErr(ctx); err != nil {
 			return nil, err
 		}
@@ -192,7 +199,7 @@ func (LibavBackend) SplitWAVFixed(ctx context.Context, wavPath, outDir, filename
 	return out, nil
 }
 
-func (LibavBackend) ExportWAV(ctx context.Context, inputPath, wavPath string, start, end time.Duration, sampleRate int) error {
+func (b LibavBackend) ExportWAV(ctx context.Context, inputPath, wavPath string, start, end time.Duration, sampleRate int) error {
 	if err := contextErr(ctx); err != nil {
 		return err
 	}
@@ -201,7 +208,7 @@ func (LibavBackend) ExportWAV(ctx context.Context, inputPath, wavPath string, st
 	defer C.free(unsafe.Pointer(cOut))
 	cancelCB, cancelHandle, releaseCancel := libavCancel(ctx)
 	defer releaseCancel()
-	if rc := C.sa_export_wav_ctx(cInput, cOut, C.int64_t(start/time.Microsecond), C.int64_t(end/time.Microsecond), C.int(sampleRate), cancelCB, cancelHandle); rc != 0 {
+	if rc := C.sa_export_wav_with_threads_ctx(cInput, cOut, C.int64_t(start/time.Microsecond), C.int64_t(end/time.Microsecond), C.int(sampleRate), C.int(b.codecThreads), cancelCB, cancelHandle); rc != 0 {
 		if err := contextErr(ctx); err != nil {
 			return err
 		}
@@ -210,7 +217,7 @@ func (LibavBackend) ExportWAV(ctx context.Context, inputPath, wavPath string, st
 	return contextErr(ctx)
 }
 
-func (LibavBackend) RenderIntervalsToWAV(ctx context.Context, inputPath, outWAVPath string, intervals []Interval, sampleRate int) error {
+func (b LibavBackend) RenderIntervalsToWAV(ctx context.Context, inputPath, outWAVPath string, intervals []Interval, sampleRate int) error {
 	if err := contextErr(ctx); err != nil {
 		return err
 	}
@@ -230,7 +237,7 @@ func (LibavBackend) RenderIntervalsToWAV(ctx context.Context, inputPath, outWAVP
 	}
 	cancelCB, cancelHandle, releaseCancel := libavCancel(ctx)
 	defer releaseCancel()
-	if rc := C.sa_render_intervals_wav_ctx(cInput, cOut, ptr, C.int(len(cIntervals)), C.int(sampleRate), cancelCB, cancelHandle); rc != 0 {
+	if rc := C.sa_render_intervals_wav_with_threads_ctx(cInput, cOut, ptr, C.int(len(cIntervals)), C.int(sampleRate), C.int(b.codecThreads), cancelCB, cancelHandle); rc != 0 {
 		if err := contextErr(ctx); err != nil {
 			return err
 		}
@@ -239,7 +246,7 @@ func (LibavBackend) RenderIntervalsToWAV(ctx context.Context, inputPath, outWAVP
 	return contextErr(ctx)
 }
 
-func (LibavBackend) ConcatWAV(ctx context.Context, wavPaths []string, outPath string) error {
+func (b LibavBackend) ConcatWAV(ctx context.Context, wavPaths []string, outPath string) error {
 	if err := contextErr(ctx); err != nil {
 		return err
 	}
@@ -256,7 +263,7 @@ func (LibavBackend) ConcatWAV(ctx context.Context, wavPaths []string, outPath st
 	}
 	cancelCB, cancelHandle, releaseCancel := libavCancel(ctx)
 	defer releaseCancel()
-	if rc := C.sa_concat_wav_ctx(ptr, C.int(len(cPaths)), cOut, cancelCB, cancelHandle); rc != 0 {
+	if rc := C.sa_concat_wav_with_threads_ctx(ptr, C.int(len(cPaths)), cOut, C.int(b.codecThreads), cancelCB, cancelHandle); rc != 0 {
 		if err := contextErr(ctx); err != nil {
 			return err
 		}
@@ -265,11 +272,11 @@ func (LibavBackend) ConcatWAV(ctx context.Context, wavPaths []string, outPath st
 	return contextErr(ctx)
 }
 
-func (LibavBackend) EncodeOpus(ctx context.Context, wavPath, oggPath string, sampleRate int, bitrate string) error {
-	return (LibavBackend{}).EncodeAudio(ctx, wavPath, oggPath, sampleRate, "ogg", "libopus", bitrate, DefaultOutputSampleFormat)
+func (b LibavBackend) EncodeOpus(ctx context.Context, wavPath, oggPath string, sampleRate int, bitrate string) error {
+	return b.EncodeAudio(ctx, wavPath, oggPath, sampleRate, "ogg", "libopus", bitrate, DefaultOutputSampleFormat)
 }
 
-func (LibavBackend) EncodeAudio(ctx context.Context, wavPath, outPath string, sampleRate int, format, codec, bitrate, sampleFormat string) error {
+func (b LibavBackend) EncodeAudio(ctx context.Context, wavPath, outPath string, sampleRate int, format, codec, bitrate, sampleFormat string) error {
 	if err := contextErr(ctx); err != nil {
 		return err
 	}
@@ -283,7 +290,7 @@ func (LibavBackend) EncodeAudio(ctx context.Context, wavPath, outPath string, sa
 	defer C.free(unsafe.Pointer(cSampleFormat))
 	cancelCB, cancelHandle, releaseCancel := libavCancel(ctx)
 	defer releaseCancel()
-	if rc := C.sa_encode_audio_ctx(cWAV, cOut, C.int(sampleRate), cFormat, cCodec, cBitrate, cSampleFormat, cancelCB, cancelHandle); rc != 0 {
+	if rc := C.sa_encode_audio_with_threads_ctx(cWAV, cOut, C.int(sampleRate), cFormat, cCodec, cBitrate, cSampleFormat, C.int(b.codecThreads), cancelCB, cancelHandle); rc != 0 {
 		if err := contextErr(ctx); err != nil {
 			return err
 		}

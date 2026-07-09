@@ -202,7 +202,11 @@ static void sa_close_input(sa_input *in) {
     in->stream = NULL;
 }
 
-static int sa_open_audio_input_ctx(const char *path, sa_input *in, const sa_cancel *cancel) {
+static void sa_apply_codec_threads(AVCodecContext *ctx, int codec_threads) {
+    if (ctx && codec_threads > 0) ctx->thread_count = codec_threads;
+}
+
+static int sa_open_audio_input_with_threads_ctx(const char *path, sa_input *in, const sa_cancel *cancel, int codec_threads) {
     memset(in, 0, sizeof(*in));
     in->stream_index = -1;
     int ret = sa_cancelled(cancel);
@@ -252,12 +256,17 @@ static int sa_open_audio_input_ctx(const char *path, sa_input *in, const sa_canc
         sa_set_av_error("avcodec_parameters_to_context", ret);
         return ret;
     }
+    sa_apply_codec_threads(in->dec, codec_threads);
     ret = avcodec_open2(in->dec, decoder, NULL);
     if (ret < 0) {
         sa_set_av_error("avcodec_open2(decoder)", ret);
         return ret;
     }
     return 0;
+}
+
+static int sa_open_audio_input_ctx(const char *path, sa_input *in, const sa_cancel *cancel) {
+    return sa_open_audio_input_with_threads_ctx(path, in, cancel, 0);
 }
 
 static int sa_open_audio_input(const char *path, sa_input *in) {
@@ -269,7 +278,7 @@ static int64_t sa_rescale_to_us(int64_t value, AVRational tb) {
     return av_rescale_q(value, tb, AV_TIME_BASE_Q);
 }
 
-int sa_probe_duration_ctx(const char *path, int media_first, int64_t *duration_us, sa_cancel_cb cancel_cb, sa_cancel_handle cancel_handle) {
+int sa_probe_duration_with_threads_ctx(const char *path, int media_first, int64_t *duration_us, int codec_threads, sa_cancel_cb cancel_cb, sa_cancel_handle cancel_handle) {
     (void)media_first;
     if (!path || !duration_us) {
         sa_set_error("invalid argument");
@@ -277,7 +286,7 @@ int sa_probe_duration_ctx(const char *path, int media_first, int64_t *duration_u
     }
     sa_cancel cancel = {cancel_cb, cancel_handle};
     sa_input in;
-    int ret = sa_open_audio_input_ctx(path, &in, &cancel);
+    int ret = sa_open_audio_input_with_threads_ctx(path, &in, &cancel, codec_threads);
     if (ret < 0) {
         sa_close_input(&in);
         return ret;
@@ -296,6 +305,10 @@ int sa_probe_duration_ctx(const char *path, int media_first, int64_t *duration_u
     }
     *duration_us = duration;
     return 0;
+}
+
+int sa_probe_duration_ctx(const char *path, int media_first, int64_t *duration_us, sa_cancel_cb cancel_cb, sa_cancel_handle cancel_handle) {
+    return sa_probe_duration_with_threads_ctx(path, media_first, duration_us, 0, cancel_cb, cancel_handle);
 }
 
 int sa_probe_duration(const char *path, int media_first, int64_t *duration_us) {
@@ -389,9 +402,9 @@ static int sa_init_filter(sa_filter *f, AVCodecContext *dec, const char *desc) {
 
 typedef int (*sa_frame_cb)(AVFrame *frame, void *opaque);
 
-static int sa_decode_filter_run_ctx(const char *path, const char *filter_desc, sa_frame_cb cb, void *opaque, const sa_cancel *cancel) {
+static int sa_decode_filter_run_with_threads_ctx(const char *path, const char *filter_desc, sa_frame_cb cb, void *opaque, const sa_cancel *cancel, int codec_threads) {
     sa_input in;
-    int ret = sa_open_audio_input_ctx(path, &in, cancel);
+    int ret = sa_open_audio_input_with_threads_ctx(path, &in, cancel, codec_threads);
     if (ret < 0) {
         sa_close_input(&in);
         return ret;
@@ -520,6 +533,10 @@ done:
     return ret;
 }
 
+static int sa_decode_filter_run_ctx(const char *path, const char *filter_desc, sa_frame_cb cb, void *opaque, const sa_cancel *cancel) {
+    return sa_decode_filter_run_with_threads_ctx(path, filter_desc, cb, opaque, cancel, 0);
+}
+
 static int sa_decode_filter_run(const char *path, const char *filter_desc, sa_frame_cb cb, void *opaque) {
     return sa_decode_filter_run_ctx(path, filter_desc, cb, opaque, NULL);
 }
@@ -637,7 +654,7 @@ static void sa_silence_log_callback(void *ptr, int level, const char *fmt, va_li
     }
 }
 
-int sa_volume_detect_ctx(const char *path, double *mean_db, double *max_db, sa_cancel_cb cancel_cb, sa_cancel_handle cancel_handle) {
+int sa_volume_detect_with_threads_ctx(const char *path, double *mean_db, double *max_db, int codec_threads, sa_cancel_cb cancel_cb, sa_cancel_handle cancel_handle) {
     if (!path || !mean_db || !max_db) {
         sa_set_error("invalid argument");
         return AVERROR(EINVAL);
@@ -649,7 +666,7 @@ int sa_volume_detect_ctx(const char *path, double *mean_db, double *max_db, sa_c
     av_log_set_level(AV_LOG_INFO);
     sa_current_volume = &cap;
     av_log_set_callback(sa_volume_log_callback);
-    int ret = sa_decode_filter_run_ctx(path, "volumedetect", NULL, NULL, &cancel);
+    int ret = sa_decode_filter_run_with_threads_ctx(path, "volumedetect", NULL, NULL, &cancel, codec_threads);
     av_log_set_callback(av_log_default_callback);
     av_log_set_level(old_level);
     sa_current_volume = NULL;
@@ -662,6 +679,10 @@ int sa_volume_detect_ctx(const char *path, double *mean_db, double *max_db, sa_c
     *mean_db = cap.has_mean ? cap.mean_db : NAN;
     *max_db = cap.has_max ? cap.max_db : NAN;
     return 0;
+}
+
+int sa_volume_detect_ctx(const char *path, double *mean_db, double *max_db, sa_cancel_cb cancel_cb, sa_cancel_handle cancel_handle) {
+    return sa_volume_detect_with_threads_ctx(path, mean_db, max_db, 0, cancel_cb, cancel_handle);
 }
 
 int sa_volume_detect(const char *path, double *mean_db, double *max_db) {
@@ -689,7 +710,7 @@ static int sa_silence_frame_cb(AVFrame *frame, void *opaque) {
     return 0;
 }
 
-int sa_silence_detect_ctx(const char *path, double noise_db, int64_t min_silence_us, sa_interval **intervals, int *interval_count, sa_cancel_cb cancel_cb, sa_cancel_handle cancel_handle) {
+int sa_silence_detect_with_threads_ctx(const char *path, double noise_db, int64_t min_silence_us, sa_interval **intervals, int *interval_count, int codec_threads, sa_cancel_cb cancel_cb, sa_cancel_handle cancel_handle) {
     if (!path || !intervals || !interval_count) {
         sa_set_error("invalid argument");
         return AVERROR(EINVAL);
@@ -706,7 +727,7 @@ int sa_silence_detect_ctx(const char *path, double noise_db, int64_t min_silence
     av_log_set_level(AV_LOG_INFO);
     sa_current_silence = &cap;
     av_log_set_callback(sa_silence_log_callback);
-    int ret = sa_decode_filter_run_ctx(path, filter, NULL, NULL, &cancel);
+    int ret = sa_decode_filter_run_with_threads_ctx(path, filter, NULL, NULL, &cancel, codec_threads);
     av_log_set_callback(av_log_default_callback);
     av_log_set_level(old_level);
     sa_current_silence = NULL;
@@ -719,6 +740,10 @@ int sa_silence_detect_ctx(const char *path, double noise_db, int64_t min_silence
     *intervals = cap.items;
     *interval_count = cap.count;
     return 0;
+}
+
+int sa_silence_detect_ctx(const char *path, double noise_db, int64_t min_silence_us, sa_interval **intervals, int *interval_count, sa_cancel_cb cancel_cb, sa_cancel_handle cancel_handle) {
+    return sa_silence_detect_with_threads_ctx(path, noise_db, min_silence_us, intervals, interval_count, 0, cancel_cb, cancel_handle);
 }
 
 int sa_silence_detect(const char *path, double noise_db, int64_t min_silence_us, sa_interval **intervals, int *interval_count) {
@@ -811,7 +836,7 @@ static void sa_close_output(sa_output *out) {
     avcodec_free_context(&out->enc);
 }
 
-static int sa_open_audio_output(const char *out_path, const char *format_name, enum AVCodecID codec_id, int sample_rate, int bit_rate, const char *sample_format, AVDictionary **mux_opts, sa_output *out) {
+static int sa_open_audio_output_with_threads(const char *out_path, const char *format_name, enum AVCodecID codec_id, int sample_rate, int bit_rate, const char *sample_format, AVDictionary **mux_opts, sa_output *out, int codec_threads) {
     memset(out, 0, sizeof(*out));
     int ret = avformat_alloc_output_context2(&out->fmt, NULL, format_name, out_path);
     if (ret < 0 || !out->fmt) {
@@ -843,6 +868,7 @@ static int sa_open_audio_output(const char *out_path, const char *format_name, e
     av_channel_layout_default(&out->enc->ch_layout, 1);
     out->enc->time_base = (AVRational){1, out->enc->sample_rate};
     if (bit_rate > 0) out->enc->bit_rate = bit_rate;
+    sa_apply_codec_threads(out->enc, codec_threads);
     if (out->fmt->oformat->flags & AVFMT_GLOBALHEADER) out->enc->flags |= AV_CODEC_FLAG_GLOBAL_HEADER;
     ret = avcodec_open2(out->enc, encoder, NULL);
     if (ret < 0) {
@@ -868,6 +894,10 @@ static int sa_open_audio_output(const char *out_path, const char *format_name, e
         return ret;
     }
     return 0;
+}
+
+static int sa_open_audio_output(const char *out_path, const char *format_name, enum AVCodecID codec_id, int sample_rate, int bit_rate, const char *sample_format, AVDictionary **mux_opts, sa_output *out) {
+    return sa_open_audio_output_with_threads(out_path, format_name, codec_id, sample_rate, bit_rate, sample_format, mux_opts, out, 0);
 }
 
 static int sa_encode_frame_ctx(sa_output *out, AVFrame *frame, const sa_cancel *cancel) {
@@ -1031,11 +1061,11 @@ static int sa_format_encoder_filter(char *filter, size_t filter_size, const char
     return 0;
 }
 
-static int sa_render_filter_to_output_ctx(const char *input_path, const char *out_path, const char *format_name, enum AVCodecID codec_id, int sample_rate, int bit_rate, const char *sample_format, const char *filter_head, const sa_cancel *cancel) {
+static int sa_render_filter_to_output_with_threads_ctx(const char *input_path, const char *out_path, const char *format_name, enum AVCodecID codec_id, int sample_rate, int bit_rate, const char *sample_format, const char *filter_head, const sa_cancel *cancel, int codec_threads) {
     int ret = sa_cancelled(cancel);
     if (ret < 0) return ret;
     sa_output out;
-    ret = sa_open_audio_output(out_path, format_name, codec_id, sample_rate, bit_rate, sample_format, NULL, &out);
+    ret = sa_open_audio_output_with_threads(out_path, format_name, codec_id, sample_rate, bit_rate, sample_format, NULL, &out, codec_threads);
     if (ret < 0) {
         sa_close_output(&out);
         return ret;
@@ -1052,7 +1082,7 @@ static int sa_render_filter_to_output_ctx(const char *input_path, const char *ou
         sa_close_output(&out);
         return ret;
     }
-    ret = sa_decode_filter_run_ctx(input_path, filter, sa_write_frame_cb, &wctx, cancel);
+    ret = sa_decode_filter_run_with_threads_ctx(input_path, filter, sa_write_frame_cb, &wctx, cancel, codec_threads);
     if (ret >= 0) ret = sa_write_ctx_flush(&wctx);
     sa_write_ctx_free(&wctx);
     if (ret >= 0) {
@@ -1063,20 +1093,28 @@ static int sa_render_filter_to_output_ctx(const char *input_path, const char *ou
     return ret;
 }
 
+static int sa_render_filter_to_output_ctx(const char *input_path, const char *out_path, const char *format_name, enum AVCodecID codec_id, int sample_rate, int bit_rate, const char *sample_format, const char *filter_head, const sa_cancel *cancel) {
+    return sa_render_filter_to_output_with_threads_ctx(input_path, out_path, format_name, codec_id, sample_rate, bit_rate, sample_format, filter_head, cancel, 0);
+}
+
 static int sa_render_filter_to_output(const char *input_path, const char *out_path, const char *format_name, enum AVCodecID codec_id, int sample_rate, int bit_rate, const char *filter_head) {
     return sa_render_filter_to_output_ctx(input_path, out_path, format_name, codec_id, sample_rate, bit_rate, NULL, filter_head, NULL);
 }
 
-int sa_transcode_wav_ctx(const char *input_path, const char *out_path, int sample_rate, sa_cancel_cb cancel_cb, sa_cancel_handle cancel_handle) {
+int sa_transcode_wav_with_threads_ctx(const char *input_path, const char *out_path, int sample_rate, int codec_threads, sa_cancel_cb cancel_cb, sa_cancel_handle cancel_handle) {
     sa_cancel cancel = {cancel_cb, cancel_handle};
-    return sa_render_filter_to_output_ctx(input_path, out_path, "wav", AV_CODEC_ID_PCM_S16LE, sample_rate > 0 ? sample_rate : 16000, 0, "s16", NULL, &cancel);
+    return sa_render_filter_to_output_with_threads_ctx(input_path, out_path, "wav", AV_CODEC_ID_PCM_S16LE, sample_rate > 0 ? sample_rate : 16000, 0, "s16", NULL, &cancel, codec_threads);
+}
+
+int sa_transcode_wav_ctx(const char *input_path, const char *out_path, int sample_rate, sa_cancel_cb cancel_cb, sa_cancel_handle cancel_handle) {
+    return sa_transcode_wav_with_threads_ctx(input_path, out_path, sample_rate, 0, cancel_cb, cancel_handle);
 }
 
 int sa_transcode_wav(const char *input_path, const char *out_path, int sample_rate) {
     return sa_transcode_wav_ctx(input_path, out_path, sample_rate, NULL, 0);
 }
 
-int sa_export_wav_ctx(const char *input_path, const char *out_path, int64_t start_us, int64_t end_us, int sample_rate, sa_cancel_cb cancel_cb, sa_cancel_handle cancel_handle) {
+int sa_export_wav_with_threads_ctx(const char *input_path, const char *out_path, int64_t start_us, int64_t end_us, int sample_rate, int codec_threads, sa_cancel_cb cancel_cb, sa_cancel_handle cancel_handle) {
     if (end_us <= start_us) {
         sa_set_error("invalid export interval");
         return AVERROR(EINVAL);
@@ -1085,14 +1123,18 @@ int sa_export_wav_ctx(const char *input_path, const char *out_path, int64_t star
     snprintf(filter, sizeof(filter), "atrim=start=%.6f:end=%.6f,asetpts=PTS-STARTPTS",
              (double)start_us / 1000000.0, (double)end_us / 1000000.0);
     sa_cancel cancel = {cancel_cb, cancel_handle};
-    return sa_render_filter_to_output_ctx(input_path, out_path, "wav", AV_CODEC_ID_PCM_S16LE, sample_rate > 0 ? sample_rate : 16000, 0, "s16", filter, &cancel);
+    return sa_render_filter_to_output_with_threads_ctx(input_path, out_path, "wav", AV_CODEC_ID_PCM_S16LE, sample_rate > 0 ? sample_rate : 16000, 0, "s16", filter, &cancel, codec_threads);
+}
+
+int sa_export_wav_ctx(const char *input_path, const char *out_path, int64_t start_us, int64_t end_us, int sample_rate, sa_cancel_cb cancel_cb, sa_cancel_handle cancel_handle) {
+    return sa_export_wav_with_threads_ctx(input_path, out_path, start_us, end_us, sample_rate, 0, cancel_cb, cancel_handle);
 }
 
 int sa_export_wav(const char *input_path, const char *out_path, int64_t start_us, int64_t end_us, int sample_rate) {
     return sa_export_wav_ctx(input_path, out_path, start_us, end_us, sample_rate, NULL, 0);
 }
 
-int sa_render_intervals_wav_ctx(const char *input_path, const char *out_path, const sa_interval *intervals, int interval_count, int sample_rate, sa_cancel_cb cancel_cb, sa_cancel_handle cancel_handle) {
+int sa_render_intervals_wav_with_threads_ctx(const char *input_path, const char *out_path, const sa_interval *intervals, int interval_count, int sample_rate, int codec_threads, sa_cancel_cb cancel_cb, sa_cancel_handle cancel_handle) {
     if (!intervals || interval_count <= 0) {
         sa_set_error("interval list is empty");
         return AVERROR(EINVAL);
@@ -1104,7 +1146,7 @@ int sa_render_intervals_wav_ctx(const char *input_path, const char *out_path, co
         snprintf(filter, sizeof(filter), "atrim=start=%.6f:end=%.6f,asetpts=PTS-STARTPTS",
                  (double)intervals[0].start_us / 1000000.0,
                  (double)intervals[0].end_us / 1000000.0);
-        return sa_render_filter_to_output_ctx(input_path, out_path, "wav", AV_CODEC_ID_PCM_S16LE, sample_rate > 0 ? sample_rate : 16000, 0, "s16", filter, &cancel);
+        return sa_render_filter_to_output_with_threads_ctx(input_path, out_path, "wav", AV_CODEC_ID_PCM_S16LE, sample_rate > 0 ? sample_rate : 16000, 0, "s16", filter, &cancel, codec_threads);
     }
     int n = snprintf(filter + used, sizeof(filter) - used, "asplit=outputs=%d", interval_count);
     if (n < 0 || (size_t)n >= sizeof(filter) - used) {
@@ -1150,14 +1192,18 @@ int sa_render_intervals_wav_ctx(const char *input_path, const char *out_path, co
         sa_set_error("filter graph too large");
         return AVERROR(ENOMEM);
     }
-    return sa_render_filter_to_output_ctx(input_path, out_path, "wav", AV_CODEC_ID_PCM_S16LE, sample_rate > 0 ? sample_rate : 16000, 0, "s16", filter, &cancel);
+    return sa_render_filter_to_output_with_threads_ctx(input_path, out_path, "wav", AV_CODEC_ID_PCM_S16LE, sample_rate > 0 ? sample_rate : 16000, 0, "s16", filter, &cancel, codec_threads);
+}
+
+int sa_render_intervals_wav_ctx(const char *input_path, const char *out_path, const sa_interval *intervals, int interval_count, int sample_rate, sa_cancel_cb cancel_cb, sa_cancel_handle cancel_handle) {
+    return sa_render_intervals_wav_with_threads_ctx(input_path, out_path, intervals, interval_count, sample_rate, 0, cancel_cb, cancel_handle);
 }
 
 int sa_render_intervals_wav(const char *input_path, const char *out_path, const sa_interval *intervals, int interval_count, int sample_rate) {
     return sa_render_intervals_wav_ctx(input_path, out_path, intervals, interval_count, sample_rate, NULL, 0);
 }
 
-int sa_encode_audio_ctx(const char *wav_path, const char *out_path, int sample_rate, const char *format_name, const char *codec_name, const char *bitrate, const char *sample_format, sa_cancel_cb cancel_cb, sa_cancel_handle cancel_handle) {
+int sa_encode_audio_with_threads_ctx(const char *wav_path, const char *out_path, int sample_rate, const char *format_name, const char *codec_name, const char *bitrate, const char *sample_format, int codec_threads, sa_cancel_cb cancel_cb, sa_cancel_handle cancel_handle) {
     if (!wav_path || !out_path) {
         sa_set_error("invalid argument");
         return AVERROR(EINVAL);
@@ -1169,22 +1215,30 @@ int sa_encode_audio_ctx(const char *wav_path, const char *out_path, int sample_r
     }
     sa_cancel cancel = {cancel_cb, cancel_handle};
     const char *format = (format_name && *format_name) ? format_name : "ogg";
-    return sa_render_filter_to_output_ctx(wav_path, out_path, format, codec_id, sample_rate > 0 ? sample_rate : 16000, sa_parse_optional_bitrate(bitrate), sample_format, NULL, &cancel);
+    return sa_render_filter_to_output_with_threads_ctx(wav_path, out_path, format, codec_id, sample_rate > 0 ? sample_rate : 16000, sa_parse_optional_bitrate(bitrate), sample_format, NULL, &cancel, codec_threads);
+}
+
+int sa_encode_audio_ctx(const char *wav_path, const char *out_path, int sample_rate, const char *format_name, const char *codec_name, const char *bitrate, const char *sample_format, sa_cancel_cb cancel_cb, sa_cancel_handle cancel_handle) {
+    return sa_encode_audio_with_threads_ctx(wav_path, out_path, sample_rate, format_name, codec_name, bitrate, sample_format, 0, cancel_cb, cancel_handle);
 }
 
 int sa_encode_audio(const char *wav_path, const char *out_path, int sample_rate, const char *format_name, const char *codec_name, const char *bitrate, const char *sample_format) {
     return sa_encode_audio_ctx(wav_path, out_path, sample_rate, format_name, codec_name, bitrate, sample_format, NULL, 0);
 }
 
+int sa_encode_opus_with_threads_ctx(const char *wav_path, const char *ogg_path, int sample_rate, const char *bitrate, int codec_threads, sa_cancel_cb cancel_cb, sa_cancel_handle cancel_handle) {
+    return sa_encode_audio_with_threads_ctx(wav_path, ogg_path, sample_rate, "ogg", "libopus", bitrate, "s16", codec_threads, cancel_cb, cancel_handle);
+}
+
 int sa_encode_opus_ctx(const char *wav_path, const char *ogg_path, int sample_rate, const char *bitrate, sa_cancel_cb cancel_cb, sa_cancel_handle cancel_handle) {
-    return sa_encode_audio_ctx(wav_path, ogg_path, sample_rate, "ogg", "libopus", bitrate, "s16", cancel_cb, cancel_handle);
+    return sa_encode_opus_with_threads_ctx(wav_path, ogg_path, sample_rate, bitrate, 0, cancel_cb, cancel_handle);
 }
 
 int sa_encode_opus(const char *wav_path, const char *ogg_path, int sample_rate, const char *bitrate) {
     return sa_encode_opus_ctx(wav_path, ogg_path, sample_rate, bitrate, NULL, 0);
 }
 
-int sa_split_wav_fixed_ctx(const char *wav_path, const char *out_dir, const char *filename_prefix, int64_t slice_us, int sample_rate, char ***paths, int *path_count, sa_cancel_cb cancel_cb, sa_cancel_handle cancel_handle) {
+int sa_split_wav_fixed_with_threads_ctx(const char *wav_path, const char *out_dir, const char *filename_prefix, int64_t slice_us, int sample_rate, char ***paths, int *path_count, int codec_threads, sa_cancel_cb cancel_cb, sa_cancel_handle cancel_handle) {
     if (!wav_path || !out_dir || !filename_prefix || !paths || !path_count) {
         sa_set_error("invalid argument");
         return AVERROR(EINVAL);
@@ -1206,7 +1260,7 @@ int sa_split_wav_fixed_ctx(const char *wav_path, const char *out_dir, const char
     av_dict_set(&opts, "segment_time", segment_time, 0);
     av_dict_set(&opts, "segment_format", "wav", 0);
     av_dict_set(&opts, "reset_timestamps", "1", 0);
-    ret = sa_open_audio_output(pattern, "segment", AV_CODEC_ID_PCM_S16LE, sample_rate > 0 ? sample_rate : 16000, 0, "s16", &opts, &out);
+    ret = sa_open_audio_output_with_threads(pattern, "segment", AV_CODEC_ID_PCM_S16LE, sample_rate > 0 ? sample_rate : 16000, 0, "s16", &opts, &out, codec_threads);
     av_dict_free(&opts);
     if (ret < 0) {
         sa_close_output(&out);
@@ -1216,7 +1270,7 @@ int sa_split_wav_fixed_ctx(const char *wav_path, const char *out_dir, const char
     char filter[256];
     snprintf(filter, sizeof(filter), "aformat=sample_fmts=%s:channel_layouts=mono,aresample=%d",
              sa_sample_fmt_name(out.enc->sample_fmt), out.enc->sample_rate);
-    ret = sa_decode_filter_run_ctx(wav_path, filter, sa_write_frame_cb, &wctx, &cancel);
+    ret = sa_decode_filter_run_with_threads_ctx(wav_path, filter, sa_write_frame_cb, &wctx, &cancel, codec_threads);
     if (ret >= 0) ret = sa_encode_frame_ctx(&out, NULL, &cancel);
     if (ret >= 0) ret = av_write_trailer(out.fmt);
     sa_close_output(&out);
@@ -1225,6 +1279,10 @@ int sa_split_wav_fixed_ctx(const char *wav_path, const char *out_dir, const char
         return ret;
     }
     return sa_collect_segment_paths(out_dir, filename_prefix, paths, path_count);
+}
+
+int sa_split_wav_fixed_ctx(const char *wav_path, const char *out_dir, const char *filename_prefix, int64_t slice_us, int sample_rate, char ***paths, int *path_count, sa_cancel_cb cancel_cb, sa_cancel_handle cancel_handle) {
+    return sa_split_wav_fixed_with_threads_ctx(wav_path, out_dir, filename_prefix, slice_us, sample_rate, paths, path_count, 0, cancel_cb, cancel_handle);
 }
 
 int sa_split_wav_fixed(const char *wav_path, const char *out_dir, const char *filename_prefix, int64_t slice_us, int sample_rate, char ***paths, int *path_count) {
@@ -1401,15 +1459,15 @@ done:
     return ret;
 }
 
-static int sa_concat_wav_reencode_ctx(const char **paths, int path_count, const char *out_path, const sa_cancel *cancel) {
+static int sa_concat_wav_reencode_with_threads_ctx(const char **paths, int path_count, const char *out_path, const sa_cancel *cancel, int codec_threads) {
     int sample_rate = 16000;
     sa_input first;
-    if (sa_open_audio_input_ctx(paths[0], &first, cancel) >= 0) {
+    if (sa_open_audio_input_with_threads_ctx(paths[0], &first, cancel, codec_threads) >= 0) {
         if (first.dec && first.dec->sample_rate > 0) sample_rate = first.dec->sample_rate;
         sa_close_input(&first);
     }
     sa_output out;
-    int ret = sa_open_audio_output(out_path, "wav", AV_CODEC_ID_PCM_S16LE, sample_rate, 0, "s16", NULL, &out);
+    int ret = sa_open_audio_output_with_threads(out_path, "wav", AV_CODEC_ID_PCM_S16LE, sample_rate, 0, "s16", NULL, &out, codec_threads);
     if (ret < 0) {
         sa_close_output(&out);
         return ret;
@@ -1424,7 +1482,7 @@ static int sa_concat_wav_reencode_ctx(const char **paths, int path_count, const 
         char filter[256];
         snprintf(filter, sizeof(filter), "aformat=sample_fmts=%s:channel_layouts=mono,aresample=%d",
                  sa_sample_fmt_name(out.enc->sample_fmt), out.enc->sample_rate);
-        ret = sa_decode_filter_run_ctx(paths[i], filter, sa_write_frame_cb, &wctx, cancel);
+        ret = sa_decode_filter_run_with_threads_ctx(paths[i], filter, sa_write_frame_cb, &wctx, cancel, codec_threads);
         if (ret < 0) break;
     }
     if (ret >= 0) ret = sa_encode_frame_ctx(&out, NULL, cancel);
@@ -1436,7 +1494,11 @@ static int sa_concat_wav_reencode_ctx(const char **paths, int path_count, const 
     return ret;
 }
 
-int sa_concat_wav_ctx(const char **paths, int path_count, const char *out_path, sa_cancel_cb cancel_cb, sa_cancel_handle cancel_handle) {
+static int sa_concat_wav_reencode_ctx(const char **paths, int path_count, const char *out_path, const sa_cancel *cancel) {
+    return sa_concat_wav_reencode_with_threads_ctx(paths, path_count, out_path, cancel, 0);
+}
+
+int sa_concat_wav_with_threads_ctx(const char **paths, int path_count, const char *out_path, int codec_threads, sa_cancel_cb cancel_cb, sa_cancel_handle cancel_handle) {
     if (!paths || path_count <= 0 || !out_path) {
         sa_set_error("empty concat input");
         return AVERROR(EINVAL);
@@ -1445,7 +1507,11 @@ int sa_concat_wav_ctx(const char **paths, int path_count, const char *out_path, 
     int ret = sa_concat_wav_copy_ctx(paths, path_count, out_path, &cancel);
     if (ret == 0) return 0;
     sa_error[0] = '\0';
-    return sa_concat_wav_reencode_ctx(paths, path_count, out_path, &cancel);
+    return sa_concat_wav_reencode_with_threads_ctx(paths, path_count, out_path, &cancel, codec_threads);
+}
+
+int sa_concat_wav_ctx(const char **paths, int path_count, const char *out_path, sa_cancel_cb cancel_cb, sa_cancel_handle cancel_handle) {
+    return sa_concat_wav_with_threads_ctx(paths, path_count, out_path, 0, cancel_cb, cancel_handle);
 }
 
 int sa_concat_wav(const char **paths, int path_count, const char *out_path) {

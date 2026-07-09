@@ -22,6 +22,7 @@ const (
 	DefaultFixedSliceLength    = 5 * time.Second
 	DefaultFixedSliceWorkers   = 16
 	DefaultSegmentWorkers      = 0
+	DefaultLibavCodecThreads   = 0
 	DefaultMaxSegmentLength    = 175 * time.Second
 	DefaultOutputSampleRate    = 16000
 	DefaultOutputFormat        = "ogg"
@@ -35,6 +36,7 @@ type Config struct {
 	Silence   SilenceConfig
 	FixedTrim FixedTrimConfig
 	Segments  SegmentConfig
+	Libav     LibavConfig
 }
 
 type SilenceConfig struct {
@@ -66,6 +68,10 @@ type SegmentConfig struct {
 	OutDir                  string
 	KeepTempWAV             *bool
 	PreserveInternalSilence *bool
+}
+
+type LibavConfig struct {
+	CodecThreads int
 }
 
 type Segment struct {
@@ -144,6 +150,9 @@ func DefaultConfig() Config {
 			KeepTempWAV:             boolPtr(true),
 			PreserveInternalSilence: boolPtr(true),
 		},
+		Libav: LibavConfig{
+			CodecThreads: DefaultLibavCodecThreads,
+		},
 	}
 }
 
@@ -214,6 +223,9 @@ func (c Config) normalized() Config {
 	}
 	if c.Segments.PreserveInternalSilence != nil {
 		d.Segments.PreserveInternalSilence = c.Segments.PreserveInternalSilence
+	}
+	if c.Libav.CodecThreads >= 0 {
+		d.Libav.CodecThreads = c.Libav.CodecThreads
 	}
 	return d
 }

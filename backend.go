@@ -87,3 +87,11 @@ func WithSegmentWorkers(workers int) Option {
 		}
 	}
 }
+
+func WithLibavCodecThreads(threads int) Option {
+	return func(p *Processor) {
+		if threads >= 0 {
+			p.cfg.Libav.CodecThreads = threads
+		}
+	}
+}

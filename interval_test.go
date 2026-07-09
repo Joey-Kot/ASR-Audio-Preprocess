@@ -135,6 +135,9 @@ func TestDefaultConfigMatchesPythonMagicNumbers(t *testing.T) {
 	if cfg.FixedTrim.MinSegmentLength != 10*time.Millisecond {
 		t.Fatalf("MinSegmentLength=%s", cfg.FixedTrim.MinSegmentLength)
 	}
+	if cfg.Libav.CodecThreads != 0 {
+		t.Fatalf("CodecThreads=%d", cfg.Libav.CodecThreads)
+	}
 	if cfg.Segments.MaxLength != 175*time.Second {
 		t.Fatalf("MaxLength=%s", cfg.Segments.MaxLength)
 	}
@@ -143,5 +146,25 @@ func TestDefaultConfigMatchesPythonMagicNumbers(t *testing.T) {
 	}
 	if !boolValue(cfg.Segments.PreserveInternalSilence, false) {
 		t.Fatal("PreserveInternalSilence default should be true")
+	}
+}
+
+func TestLibavCodecThreadsConfigAndOption(t *testing.T) {
+	cfg := DefaultConfig()
+	cfg.Libav.CodecThreads = 3
+	p, err := NewProcessor(WithBackend(&fakeBackend{}), WithConfig(cfg))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if p.Config().Libav.CodecThreads != 3 {
+		t.Fatalf("CodecThreads=%d want 3", p.Config().Libav.CodecThreads)
+	}
+
+	p, err = NewProcessor(WithBackend(&fakeBackend{}), WithLibavCodecThreads(2))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if p.Config().Libav.CodecThreads != 2 {
+		t.Fatalf("CodecThreads=%d want 2", p.Config().Libav.CodecThreads)
 	}
 }
