@@ -21,6 +21,7 @@ const (
 	DefaultPadding             = 100 * time.Millisecond
 	DefaultFixedSliceLength    = 5 * time.Second
 	DefaultFixedSliceWorkers   = 16
+	DefaultSegmentWorkers      = 0
 	DefaultMaxSegmentLength    = 175 * time.Second
 	DefaultOutputSampleRate    = 16000
 	DefaultOutputFormat        = "ogg"
@@ -56,6 +57,7 @@ type FixedTrimConfig struct {
 
 type SegmentConfig struct {
 	MaxLength               time.Duration
+	Workers                 int
 	OutputSampleRate        int
 	OutputFormat            string
 	OutputCodec             string
@@ -133,6 +135,7 @@ func DefaultConfig() Config {
 		},
 		Segments: SegmentConfig{
 			MaxLength:               DefaultMaxSegmentLength,
+			Workers:                 DefaultSegmentWorkers,
 			OutputSampleRate:        DefaultOutputSampleRate,
 			OutputFormat:            DefaultOutputFormat,
 			OutputCodec:             DefaultOutputCodec,
@@ -184,6 +187,9 @@ func (c Config) normalized() Config {
 	}
 	if c.Segments.MaxLength > 0 {
 		d.Segments.MaxLength = c.Segments.MaxLength
+	}
+	if c.Segments.Workers >= 0 {
+		d.Segments.Workers = c.Segments.Workers
 	}
 	if c.Segments.OutputSampleRate > 0 {
 		d.Segments.OutputSampleRate = c.Segments.OutputSampleRate

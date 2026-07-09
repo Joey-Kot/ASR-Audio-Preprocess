@@ -15,17 +15,23 @@ import (
 	"context"
 	"errors"
 	"path/filepath"
+	"runtime"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 )
 
 type fakeBackend struct {
+	mu             sync.Mutex
 	duration       time.Duration
 	splitCalled    bool
 	splitOutDir    string
 	splitPaths     []string
 	encodedAudio   []encodedAudioCall
+	encodeDelay    time.Duration
+	activeEncodes  int
+	maxEncodes     int
 	useSilences    bool
 	silences       []Interval
 	exportFailures map[string]bool
@@ -95,6 +101,8 @@ func (f *fakeBackend) RenderIntervalsToWAV(ctx context.Context, inputPath, outWA
 }
 
 func (f *fakeBackend) ConcatWAV(ctx context.Context, wavPaths []string, outPath string) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
 	f.concatInputs = append([]string(nil), wavPaths...)
 	return nil
 }
@@ -104,6 +112,11 @@ func (f *fakeBackend) EncodeOpus(ctx context.Context, wavPath, oggPath string, s
 }
 
 func (f *fakeBackend) EncodeAudio(ctx context.Context, wavPath, outPath string, sampleRate int, format, codec, bitrate, sampleFormat string) error {
+	f.mu.Lock()
+	f.activeEncodes++
+	if f.activeEncodes > f.maxEncodes {
+		f.maxEncodes = f.activeEncodes
+	}
 	f.encodedAudio = append(f.encodedAudio, encodedAudioCall{
 		WAVPath:    wavPath,
 		OutputPath: outPath,
@@ -113,6 +126,15 @@ func (f *fakeBackend) EncodeAudio(ctx context.Context, wavPath, outPath string, 
 		Bitrate:    bitrate,
 		SampleFmt:  sampleFormat,
 	})
+	f.mu.Unlock()
+	defer func() {
+		f.mu.Lock()
+		f.activeEncodes--
+		f.mu.Unlock()
+	}()
+	if f.encodeDelay > 0 {
+		time.Sleep(f.encodeDelay)
+	}
 	for marker := range f.encodeFailures {
 		if strings.Contains(outPath, marker) || strings.Contains(wavPath, marker) || strings.Contains(format, marker) || strings.Contains(codec, marker) {
 			return errors.New("encode failed")
@@ -364,6 +386,43 @@ func TestSplitWAVBySilenceGroupsUsesConfiguredOutputAudio(t *testing.T) {
 	}
 }
 
+func TestSplitWAVBySilenceGroupsUsesSegmentWorkersAndKeepsOrder(t *testing.T) {
+	if runtime.NumCPU() < 2 {
+		t.Skip("requires at least 2 CPUs")
+	}
+	backend := &fakeBackend{
+		duration:    10 * time.Second,
+		encodeDelay: 20 * time.Millisecond,
+	}
+	cfg := DefaultConfig()
+	cfg.Silence.Padding = 0
+	cfg.Segments.MaxLength = 1 * time.Second
+	cfg.Segments.Workers = 2
+	cfg.Segments.OutDir = t.TempDir()
+	p, err := NewProcessor(WithBackend(backend), WithConfig(cfg), WithSilencePadding(0))
+	if err != nil {
+		t.Fatal(err)
+	}
+	segments, info, err := p.SplitWAVBySilenceGroups(context.Background(), "/tmp/input.wav")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(segments) < 2 {
+		t.Fatalf("segments=%d want multiple segments", len(segments))
+	}
+	if backend.maxEncodes < 2 {
+		t.Fatalf("max concurrent encodes=%d want at least 2", backend.maxEncodes)
+	}
+	for i, segment := range segments {
+		if segment.Index != i+1 {
+			t.Fatalf("segment[%d].Index=%d want %d", i, segment.Index, i+1)
+		}
+	}
+	if info.SegmentCount != len(segments) {
+		t.Fatalf("segment count=%d len=%d", info.SegmentCount, len(segments))
+	}
+}
+
 func TestSplitWAVBySilenceGroupsUsesConfiguredWAVSampleFormat(t *testing.T) {
 	backend := &fakeBackend{duration: 10 * time.Second}
 	cfg := DefaultConfig()
@@ -470,6 +529,33 @@ func TestSplitWAVBySilenceGroupsReturnsErrorForConfiguredOutputEncodeFailure(t *
 	}
 	if !strings.Contains(err.Error(), "encode segment 1 as flac/flac") {
 		t.Fatalf("error=%q", err)
+	}
+}
+
+func TestSplitWAVBySilenceGroupsStopsDispatchAfterConfiguredOutputEncodeFailure(t *testing.T) {
+	backend := &fakeBackend{
+		duration:       10 * time.Second,
+		encodeFailures: map[string]bool{"part001": true},
+	}
+	cfg := DefaultConfig()
+	cfg.Silence.Padding = 0
+	cfg.Segments.MaxLength = 1 * time.Second
+	cfg.Segments.Workers = 1
+	cfg.Segments.OutDir = t.TempDir()
+	cfg.Segments.OutputFormat = "flac"
+	p, err := NewProcessor(WithBackend(backend), WithConfig(cfg), WithSilencePadding(0))
+	if err != nil {
+		t.Fatal(err)
+	}
+	segments, _, err := p.SplitWAVBySilenceGroups(context.Background(), "/tmp/input.wav")
+	if err == nil {
+		t.Fatal("expected encode error for configured output")
+	}
+	if len(segments) != 0 {
+		t.Fatalf("segments=%d want none on first encode error", len(segments))
+	}
+	if len(backend.encodedAudio) != 1 {
+		t.Fatalf("encoded audio calls=%d want only the failing first segment", len(backend.encodedAudio))
 	}
 }
 

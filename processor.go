@@ -16,7 +16,6 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
-	"sync"
 	"time"
 )
 
@@ -145,28 +144,34 @@ func (p *Processor) SplitWAVBySilenceGroups(ctx context.Context, wavPath string)
 		return nil, info, err
 	}
 	base := newWorkFileStem()
-	segments := make([]Segment, 0, len(groups))
 	preserveInternalSilence := boolValue(p.cfg.Segments.PreserveInternalSilence, true)
 	output := p.cfg.Segments.audioOutput()
-	for idx, group := range groups {
+	type segmentResult struct {
+		Segment        Segment
+		OutputDuration time.Duration
+		Effective      time.Duration
+		Done           bool
+		Skipped        bool
+		Err            error
+	}
+	results, segmentErr := MapSettledOrderedUntilError(ctx, groups, p.cfg.Segments.Workers, func(ctx context.Context, idx int, group []Interval) (segmentResult, error) {
 		index := idx + 1
 		segWAV := filepath.Join(outDir, fmt.Sprintf("%s_seg%03d.wav", base, index))
 		if preserveInternalSilence {
 			if err := p.backend.ExportWAV(ctx, wavPath, segWAV, group[0].Start, group[len(group)-1].End, p.cfg.Segments.OutputSampleRate); err != nil {
-				info.SegmentSkipped++
-				continue
+				return segmentResult{Done: true, Skipped: true}, nil
 			}
 		} else {
 			if err := p.backend.RenderIntervalsToWAV(ctx, wavPath, segWAV, group, p.cfg.Segments.OutputSampleRate); err != nil {
-				info.SegmentSkipped++
-				continue
+				return segmentResult{Done: true, Skipped: true}, nil
 			}
 		}
 		outAudio := filepath.Join(outDir, fmt.Sprintf("%s_part%03d.%s", base, index, output.Extension))
 		file := outAudio
 		if err := p.backend.EncodeAudio(ctx, segWAV, outAudio, p.cfg.Segments.OutputSampleRate, output.Format, output.Codec, output.Bitrate, output.SampleFormat); err != nil {
 			if !p.cfg.Segments.allowEncodeFallbackToWAV(output) {
-				return segments, info, fmt.Errorf("encode segment %d as %s/%s: %w", index, output.Format, output.Codec, err)
+				err := fmt.Errorf("encode segment %d as %s/%s: %w", index, output.Format, output.Codec, err)
+				return segmentResult{Done: true, Err: err}, err
 			}
 			file = segWAV
 		}
@@ -176,7 +181,7 @@ func (p *Processor) SplitWAVBySilenceGroups(ctx context.Context, wavPath string)
 		if boolValue(p.cfg.Segments.KeepTempWAV, true) {
 			tempWAV = segWAV
 		}
-		segments = append(segments, Segment{
+		segment := Segment{
 			Index:      index,
 			File:       file,
 			TempWAV:    tempWAV,
@@ -187,14 +192,42 @@ func (p *Processor) SplitWAVBySilenceGroups(ctx context.Context, wavPath string)
 			Intervals:  append([]Interval(nil), group...),
 			SourceWAV:  wavPath,
 			SourcePath: wavPath,
-		})
-		info.OutputFiles = append(info.OutputFiles, file)
-		info.EffectiveDuration += sumIntervalDurations(group)
-		if preserveInternalSilence {
-			info.OutputDuration += end - start
-		} else {
-			info.OutputDuration += sumIntervalDurations(group)
 		}
+		result := segmentResult{
+			Segment:   segment,
+			Effective: sumIntervalDurations(group),
+			Done:      true,
+		}
+		if preserveInternalSilence {
+			result.OutputDuration = end - start
+		} else {
+			result.OutputDuration = result.Effective
+		}
+		return result, nil
+	})
+	segments := make([]Segment, 0, len(groups))
+	for _, r := range results {
+		if !r.Done {
+			if err := ctx.Err(); err != nil {
+				return segments, info, err
+			}
+			info.SegmentSkipped++
+			continue
+		}
+		if r.Err != nil {
+			return segments, info, r.Err
+		}
+		if r.Skipped {
+			info.SegmentSkipped++
+			continue
+		}
+		segments = append(segments, r.Segment)
+		info.OutputFiles = append(info.OutputFiles, r.Segment.File)
+		info.EffectiveDuration += r.Effective
+		info.OutputDuration += r.OutputDuration
+	}
+	if segmentErr != nil {
+		return segments, info, segmentErr
 	}
 	info.SegmentCount = len(segments)
 	info.OutputPath = outDir
@@ -275,19 +308,29 @@ func (p *Processor) RemoveSilenceByFixedSlicesAndMerge(ctx context.Context, wavP
 		}
 		return sliceResult{Index: i + 1, Path: trimmed, Info: trimInfo, OK: true}
 	}
-	results := processSlicesSettled(ctx, slicePaths, cfg.FixedTrim.Workers, process)
-	paths := make([]string, 0, len(results))
-	for _, r := range results {
+	results := MapSettledOrdered(ctx, slicePaths, cfg.FixedTrim.Workers, process)
+	type validatedSlice struct {
+		Result sliceResult
+		Valid  bool
+	}
+	validated := MapSettledOrdered(ctx, results, cfg.FixedTrim.Workers, func(ctx context.Context, _ int, r sliceResult) validatedSlice {
+		if !r.OK || r.Path == "" {
+			return validatedSlice{Result: r}
+		}
+		d, err := p.backend.ProbeDuration(ctx, r.Path, ProbeWAVFirst)
+		if err == nil && d >= cfg.FixedTrim.MinSegmentLength {
+			return validatedSlice{Result: r, Valid: true}
+		}
+		return validatedSlice{Result: r}
+	})
+	paths := make([]string, 0, len(validated))
+	for _, v := range validated {
+		r := v.Result
 		info.DetectedSilenceCount += r.Info.DetectedSilenceCount
 		info.DetectedSpeechIntervalCount += r.Info.DetectedSpeechIntervalCount
 		info.DetectedEffectiveDuration += r.Info.DetectedEffectiveDuration
 		info.EffectiveDuration += r.Info.EffectiveDuration
-		if !r.OK || r.Path == "" {
-			info.FixedSliceSkipped++
-			continue
-		}
-		d, err := p.backend.ProbeDuration(ctx, r.Path, ProbeWAVFirst)
-		if err == nil && d >= cfg.FixedTrim.MinSegmentLength {
+		if v.Valid {
 			paths = append(paths, r.Path)
 			info.FixedSliceSucceeded++
 			continue
@@ -347,59 +390,15 @@ func sumIntervalDurations(intervals []Interval) time.Duration {
 
 func sumProbeDurations(ctx context.Context, backend Backend, paths []string) time.Duration {
 	var total time.Duration
-	for _, path := range paths {
+	durations := MapSettledOrdered(ctx, paths, 0, func(ctx context.Context, _ int, path string) time.Duration {
 		duration, err := backend.ProbeDuration(ctx, path, ProbeWAVFirst)
 		if err == nil {
-			total += duration
+			return duration
 		}
+		return 0
+	})
+	for _, duration := range durations {
+		total += duration
 	}
 	return total
-}
-
-func processSlicesSettled[R any](ctx context.Context, items []string, workers int, fn func(context.Context, int, string) R) []R {
-	if workers <= 0 {
-		workers = 1
-	}
-	if workers > len(items) && len(items) > 0 {
-		workers = len(items)
-	}
-	type job struct {
-		index int
-		path  string
-	}
-	type result struct {
-		index int
-		value R
-	}
-	jobs := make(chan job)
-	results := make(chan result, len(items))
-	var wg sync.WaitGroup
-	for range workers {
-		wg.Add(1)
-		go func() {
-			defer wg.Done()
-			for j := range jobs {
-				results <- result{index: j.index, value: fn(ctx, j.index, j.path)}
-			}
-		}()
-	}
-	go func() {
-		defer close(jobs)
-		for i, item := range items {
-			select {
-			case <-ctx.Done():
-				return
-			case jobs <- job{index: i, path: item}:
-			}
-		}
-	}()
-	go func() {
-		wg.Wait()
-		close(results)
-	}()
-	out := make([]R, len(items))
-	for r := range results {
-		out[r.index] = r.value
-	}
-	return out
 }

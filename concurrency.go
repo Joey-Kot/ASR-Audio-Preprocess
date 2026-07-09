@@ -13,16 +13,12 @@ package smartaudio
 
 import (
 	"context"
+	"runtime"
 	"sync"
 )
 
 func MapOrdered[T any, R any](ctx context.Context, items []T, workers int, fn func(context.Context, int, T) (R, error)) ([]R, error) {
-	if workers <= 0 {
-		workers = 1
-	}
-	if workers > len(items) && len(items) > 0 {
-		workers = len(items)
-	}
+	workers = explicitWorkerCount(len(items), workers)
 	type job struct {
 		index int
 		item  T
@@ -85,4 +81,139 @@ func MapOrdered[T any, R any](ctx context.Context, items []T, workers int, fn fu
 		}
 	}
 	return out, nil
+}
+
+func MapSettledOrdered[T any, R any](ctx context.Context, items []T, workers int, fn func(context.Context, int, T) R) []R {
+	workers = effectiveWorkerCount(len(items), workers)
+	type job struct {
+		index int
+		item  T
+	}
+	type result struct {
+		index int
+		value R
+	}
+	jobs := make(chan job)
+	results := make(chan result, len(items))
+	var wg sync.WaitGroup
+	for range workers {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			for j := range jobs {
+				results <- result{index: j.index, value: fn(ctx, j.index, j.item)}
+			}
+		}()
+	}
+	go func() {
+		defer close(jobs)
+		for i, item := range items {
+			select {
+			case <-ctx.Done():
+				return
+			case jobs <- job{index: i, item: item}:
+			}
+		}
+	}()
+	go func() {
+		wg.Wait()
+		close(results)
+	}()
+
+	out := make([]R, len(items))
+	for r := range results {
+		out[r.index] = r.value
+	}
+	return out
+}
+
+func MapSettledOrderedUntilError[T any, R any](ctx context.Context, items []T, workers int, fn func(context.Context, int, T) (R, error)) ([]R, error) {
+	workers = effectiveWorkerCount(len(items), workers)
+	type job struct {
+		index int
+		item  T
+	}
+	type result struct {
+		index int
+		value R
+		err   error
+	}
+	ctx, cancel := context.WithCancel(ctx)
+	defer cancel()
+
+	jobs := make(chan job)
+	results := make(chan result, len(items))
+	var wg sync.WaitGroup
+	for range workers {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			for j := range jobs {
+				value, err := fn(ctx, j.index, j.item)
+				if err != nil {
+					cancel()
+				}
+				results <- result{index: j.index, value: value, err: err}
+			}
+		}()
+	}
+	go func() {
+		defer close(jobs)
+		for i, item := range items {
+			select {
+			case <-ctx.Done():
+				return
+			case jobs <- job{index: i, item: item}:
+			}
+		}
+	}()
+	go func() {
+		wg.Wait()
+		close(results)
+	}()
+
+	out := make([]R, len(items))
+	var firstErr error
+	for r := range results {
+		if r.err != nil && firstErr == nil {
+			firstErr = r.err
+		}
+		out[r.index] = r.value
+	}
+	if firstErr != nil {
+		return out, firstErr
+	}
+	return out, ctx.Err()
+}
+
+func effectiveWorkerCount(itemCount, workers int) int {
+	if itemCount <= 0 {
+		return 1
+	}
+	if workers <= 0 {
+		workers = runtime.NumCPU()
+	}
+	if workers <= 0 {
+		workers = 1
+	}
+	if workers > runtime.NumCPU() {
+		workers = runtime.NumCPU()
+	}
+	if workers > itemCount {
+		workers = itemCount
+	}
+	if workers <= 0 {
+		return 1
+	}
+	return workers
+}
+
+func explicitWorkerCount(itemCount, workers int) int {
+	if workers <= 0 {
+		workers = 1
+	}
+	if workers > itemCount && itemCount > 0 {
+		workers = itemCount
+	}
+	return workers
 }

@@ -79,3 +79,11 @@ func WithMaxSegmentLength(maxLength time.Duration) Option {
 		}
 	}
 }
+
+func WithSegmentWorkers(workers int) Option {
+	return func(p *Processor) {
+		if workers >= 0 {
+			p.cfg.Segments.Workers = workers
+		}
+	}
+}
