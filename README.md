@@ -508,7 +508,9 @@ Release 二进制面向非 Go 项目使用，调用方式和本地构建的 CLI 
 ```text
 smartaudio / smartaudio.exe
 LICENSE
+NOTICE
 THIRD_PARTY_NOTICES.md
+THIRD_PARTY_LICENSES/
 ```
 
 ## 测试
@@ -546,4 +548,7 @@ CLI 则固定输出 JSON：
 
 ## 许可证
 
-本项目使用 GNU General Public License v3.0 or later。详见 [LICENSE](LICENSE)。
+本项目采用 GNU General Public License v3.0 or later 授权。详见
+[LICENSE](LICENSE)。第三方依赖及其完整许可证文本见
+[THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md) 和
+[`THIRD_PARTY_LICENSES/`](THIRD_PARTY_LICENSES/)。

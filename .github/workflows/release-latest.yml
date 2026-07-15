@@ -61,6 +61,17 @@ jobs:
           grep -R "CONFIG_IAMF 0" third_party/src/ffmpeg-*/config.h
           grep -R "CONFIG_IAMFDEC 0" third_party/src/ffmpeg-*/config.h
 
+      - name: Check third-party notices
+        run: |
+          test -s NOTICE
+          test -s THIRD_PARTY_NOTICES.md
+          grep -qi 'FFmpeg' THIRD_PARTY_NOTICES.md
+          grep -qi 'Opus' THIRD_PARTY_NOTICES.md
+          test -s THIRD_PARTY_LICENSES/FFmpeg-LGPL-2.1-or-later.txt
+          grep -qi 'GNU LESSER GENERAL PUBLIC LICENSE' THIRD_PARTY_LICENSES/FFmpeg-LGPL-2.1-or-later.txt
+          test -s THIRD_PARTY_LICENSES/Opus-BSD-3-Clause.txt
+          grep -qi 'Redistribution and use in source and binary forms' THIRD_PARTY_LICENSES/Opus-BSD-3-Clause.txt
+
       - name: Build CLI
         run: |
           mkdir -p dist
@@ -74,8 +85,9 @@ jobs:
       - name: Package CLI
         run: |
           artifact="smartaudio-linux-${{ matrix.arch }}.tar.gz"
-          cp LICENSE THIRD_PARTY_NOTICES.md dist/
-          tar -C dist -czf "$artifact" smartaudio LICENSE THIRD_PARTY_NOTICES.md
+          cp LICENSE NOTICE THIRD_PARTY_NOTICES.md dist/
+          cp -R THIRD_PARTY_LICENSES dist/
+          tar -C dist -czf "$artifact" smartaudio LICENSE NOTICE THIRD_PARTY_NOTICES.md THIRD_PARTY_LICENSES
           sha256sum "$artifact" > "$artifact.sha256"
           mkdir -p upload
           mv "$artifact" "$artifact.sha256" upload/
@@ -169,6 +181,17 @@ jobs:
           grep -R "CONFIG_IAMF 0" third_party/src/ffmpeg-*/config.h
           grep -R "CONFIG_IAMFDEC 0" third_party/src/ffmpeg-*/config.h
 
+      - name: Check third-party notices
+        run: |
+          test -s NOTICE
+          test -s THIRD_PARTY_NOTICES.md
+          grep -qi 'FFmpeg' THIRD_PARTY_NOTICES.md
+          grep -qi 'Opus' THIRD_PARTY_NOTICES.md
+          test -s THIRD_PARTY_LICENSES/FFmpeg-LGPL-2.1-or-later.txt
+          grep -qi 'GNU LESSER GENERAL PUBLIC LICENSE' THIRD_PARTY_LICENSES/FFmpeg-LGPL-2.1-or-later.txt
+          test -s THIRD_PARTY_LICENSES/Opus-BSD-3-Clause.txt
+          grep -qi 'Redistribution and use in source and binary forms' THIRD_PARTY_LICENSES/Opus-BSD-3-Clause.txt
+
       - name: Normalize Windows ARM64 pkg-config flags
         if: matrix.arch == 'arm64'
         run: sed -i 's/ -latomic//g' third_party/ffmpeg-audio/lib/pkgconfig/*.pc
@@ -187,8 +210,9 @@ jobs:
       - name: Package CLI
         run: |
           artifact="smartaudio-windows-${{ matrix.arch }}.zip"
-          cp LICENSE THIRD_PARTY_NOTICES.md dist/
-          (cd dist && zip -9 "../$artifact" smartaudio.exe LICENSE THIRD_PARTY_NOTICES.md)
+          cp LICENSE NOTICE THIRD_PARTY_NOTICES.md dist/
+          cp -R THIRD_PARTY_LICENSES dist/
+          (cd dist && zip -9 "../$artifact" smartaudio.exe LICENSE NOTICE THIRD_PARTY_NOTICES.md THIRD_PARTY_LICENSES/*)
           sha256sum "$artifact" > "$artifact.sha256"
           mkdir -p upload
           mv "$artifact" "$artifact.sha256" upload/
