@@ -124,8 +124,8 @@ func parseFlags() cliOptions {
 	flag.StringVar(&opts.mode, "mode", "process", "operation: process, preconvert, trim, fixed-trim, split")
 	flag.StringVar(&opts.input, "input", "", "input audio path")
 	flag.StringVar(&opts.output, "output", "", "output path for preconvert, trim, fixed-trim, or merged WAV in process mode")
-	flag.StringVar(&opts.wav, "wav", "", "intermediate WAV path for process mode")
-	flag.StringVar(&opts.workDir, "work-dir", "", "working directory for process mode and fixed slice temp files")
+	flag.StringVar(&opts.wav, "wav", "", "intermediate WAV path for process or split mode")
+	flag.StringVar(&opts.workDir, "work-dir", "", "working directory for process/split intermediate WAVs and fixed slice temp files")
 	flag.StringVar(&opts.outDir, "out-dir", "", "segment output directory")
 	flag.IntVar(&opts.outputSampleRate, "output-sample-rate", smartaudio.DefaultOutputSampleRate, "segment output sample rate")
 	flag.StringVar(&opts.outputFormat, "output-format", smartaudio.DefaultOutputFormat, "segment output container format, for example ogg, wav, flac, aac, or m4a")
@@ -248,35 +248,64 @@ func runFixedTrim(ctx context.Context, p *smartaudio.Processor, opts cliOptions)
 }
 
 func runSplit(ctx context.Context, p *smartaudio.Processor, opts cliOptions) error {
-	segments, info, err := p.SplitWAVBySilenceGroups(ctx, opts.input)
+	workDir, cleanupWorkDir, err := prepareCLIWorkDir(opts.workDir)
 	if err != nil {
 		return err
 	}
+	defer cleanupWorkDir()
+
+	base := newCLIWorkFileStem()
+	if p.Config().Segments.OutDir == "" {
+		cfg := p.Config()
+		cfg.Segments.OutDir = filepath.Join(filepath.Dir(opts.input), "out_segments")
+		p, err = smartaudio.NewProcessor(smartaudio.WithConfig(cfg))
+		if err != nil {
+			return err
+		}
+	}
+	wavPath := opts.wav
+	temporaryWAV := opts.wav == "" && opts.workDir == ""
+	if wavPath == "" {
+		wavPath = filepath.Join(workDir, base+".wav")
+	}
+	preInfo, err := p.PreconvertToWAV(ctx, opts.input, wavPath, opts.outputSampleRate)
+	if err != nil {
+		return err
+	}
+	segments, splitInfo, err := p.SplitWAVBySilenceGroups(ctx, wavPath)
+	if err != nil {
+		return err
+	}
+	remapTemporarySplitSources(segments, opts.input, temporaryWAV)
+	info := combineProcessInfo(opts.input, splitInfo.OutputPath, preInfo, smartaudio.ProcessingInfo{}, splitInfo)
 	return writeJSON(cliResult{
 		Mode:       opts.mode,
 		OutputPath: info.OutputPath,
 		Info:       infoToJSON(info),
 		Segments:   segmentsToJSON(segments),
+		Steps: &stepInfoJSON{
+			Preconvert: infoToJSON(preInfo),
+			Split:      infoToJSON(splitInfo),
+		},
 	})
 }
 
+func remapTemporarySplitSources(segments []smartaudio.Segment, inputPath string, temporaryWAV bool) {
+	if !temporaryWAV {
+		return
+	}
+	for i := range segments {
+		segments[i].SourceWAV = ""
+		segments[i].SourcePath = inputPath
+	}
+}
+
 func runProcess(ctx context.Context, p *smartaudio.Processor, opts cliOptions) error {
-	workDir := opts.workDir
-	cleanupWorkDir := false
-	if workDir == "" {
-		var err error
-		workDir, err = os.MkdirTemp("", "smartaudio-cli-*")
-		if err != nil {
-			return err
-		}
-		cleanupWorkDir = true
-	}
-	if cleanupWorkDir {
-		defer os.RemoveAll(workDir)
-	}
-	if err := os.MkdirAll(workDir, 0o755); err != nil {
+	workDir, cleanupWorkDir, err := prepareCLIWorkDir(opts.workDir)
+	if err != nil {
 		return err
 	}
+	defer cleanupWorkDir()
 
 	base := newCLIWorkFileStem()
 	if p.Config().Segments.OutDir == "" {
@@ -297,13 +326,11 @@ func runProcess(ctx context.Context, p *smartaudio.Processor, opts cliOptions) e
 		mergedPath = filepath.Join(workDir, base+"_merged.wav")
 	}
 
-	var preInfo smartaudio.ProcessingInfo
 	processInput := wavPath
-	info, err := p.PreconvertToWAV(ctx, opts.input, processInput, opts.outputSampleRate)
+	preInfo, err := p.PreconvertToWAV(ctx, opts.input, processInput, opts.outputSampleRate)
 	if err != nil {
 		return err
 	}
-	preInfo = info
 
 	merged, trimInfo, err := p.RemoveSilenceByFixedSlicesAndMerge(ctx, processInput, mergedPath)
 	if err != nil {
@@ -330,7 +357,7 @@ func runProcess(ctx context.Context, p *smartaudio.Processor, opts cliOptions) e
 	if err != nil {
 		return err
 	}
-	info = combineProcessInfo(opts.input, splitInfo.OutputPath, preInfo, trimInfo, splitInfo)
+	info := combineProcessInfo(opts.input, splitInfo.OutputPath, preInfo, trimInfo, splitInfo)
 	return writeJSON(cliResult{
 		Mode:       opts.mode,
 		OutputPath: splitInfo.OutputPath,
@@ -342,6 +369,26 @@ func runProcess(ctx context.Context, p *smartaudio.Processor, opts cliOptions) e
 			Split:      infoToJSON(splitInfo),
 		},
 	})
+}
+
+func prepareCLIWorkDir(configured string) (string, func(), error) {
+	if configured != "" {
+		if err := os.MkdirAll(configured, 0o755); err != nil {
+			return "", nil, err
+		}
+		return configured, func() {}, nil
+	}
+	workDir, err := os.MkdirTemp("", "smartaudio-cli-*")
+	if err != nil {
+		return "", nil, err
+	}
+	if err := os.MkdirAll(workDir, 0o755); err != nil {
+		_ = os.RemoveAll(workDir)
+		return "", nil, err
+	}
+	return workDir, func() {
+		_ = os.RemoveAll(workDir)
+	}, nil
 }
 
 func combineProcessInfo(inputPath, outputPath string, preInfo, trimInfo, splitInfo smartaudio.ProcessingInfo) smartaudio.ProcessingInfo {

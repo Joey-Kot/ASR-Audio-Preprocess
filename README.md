@@ -261,10 +261,10 @@ All arguments use the `--xx-xx value` form.
 | `--mode` | `process` | `process`, `preconvert`, `trim`, `fixed-trim`, or `split` |
 | `--input` | empty | Required input audio path |
 | `--output` | empty | Output path for `preconvert`, `trim`, or `fixed-trim`; merged WAV path for `process` |
-| `--wav` | empty | Intermediate WAV path in `process` mode |
-| `--work-dir` | temporary directory | Working and fixed-slice temporary directory |
+| `--wav` | empty | Intermediate WAV path in `process` or `split` mode |
+| `--work-dir` | temporary directory | Working directory for `process`/`split` intermediate WAVs and fixed-slice temporary files |
 | `--out-dir` | process: random-ID directory beside input; split: `out_segments` beside input | ASR segment output directory |
-| `--output-sample-rate` | `16000` | Output sample rate |
+| `--output-sample-rate` | `16000` | Sample rate for the normalized WAV and final ASR segments |
 | `--output-sample-format` | `s16` | `s16`, `s24`, `s32`, or `f32` |
 | `--output-format` | `ogg` | `ogg`, `wav`, `flac`, `aac`, or `m4a` |
 | `--output-codec` | `libopus` | ASR segment output codec |
@@ -305,7 +305,10 @@ To export 16 kHz, 24-bit WAV:
 
 ```text
 process: input audio -> WAV -> concurrent fixed-slice silence trimming -> merged WAV -> ASR segments
+split: input audio -> WAV -> ASR segments
 ```
+
+`split` always normalizes the input into an intermediate WAV before silence detection. Output container, codec, bitrate, sample rate, and sample-format options still control the final ASR segments.
 
 ### Individual steps
 
@@ -313,7 +316,7 @@ process: input audio -> WAV -> concurrent fixed-slice silence trimming -> merged
 ./smartaudio --mode preconvert --input /tmp/input.mp3 --output /tmp/input.wav
 ./smartaudio --mode trim --input /tmp/input.wav --output /tmp/input_trimmed.wav
 ./smartaudio --mode fixed-trim --input /tmp/input.wav --output /tmp/input_merged.wav
-./smartaudio --mode split --input /tmp/input_merged.wav --out-dir /tmp/segments
+./smartaudio --mode split --input /tmp/input.mp3 --out-dir /tmp/segments
 ```
 
 ### CLI output

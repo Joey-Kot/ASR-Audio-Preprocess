@@ -338,10 +338,10 @@ go build -tags libav -trimpath \
 | `--mode` | `process` | 操作模式：`process`、`preconvert`、`trim`、`fixed-trim`、`split` |
 | `--input` | 空 | 输入音频路径，必填 |
 | `--output` | 空 | 输出路径，用于 `preconvert`、`trim`、`fixed-trim`，也可作为 `process` 的合并 WAV 路径 |
-| `--wav` | 空 | `process` 模式的中间 WAV 路径 |
-| `--work-dir` | 临时目录 | 工作目录和固定切片临时目录 |
+| `--wav` | 空 | `process` 或 `split` 模式的中间 WAV 路径 |
+| `--work-dir` | 临时目录 | `process`、`split` 中间 WAV 的工作目录，以及固定切片临时目录 |
 | `--out-dir` | `process` 模式为输入同目录下的短随机 ID 目录；`split` 模式为输入同目录下的 `out_segments` | ASR 分片输出目录 |
-| `--output-sample-rate` | `16000` | ASR 分片输出采样率 |
+| `--output-sample-rate` | `16000` | 统一 WAV 与最终 ASR 分片的采样率 |
 | `--output-sample-format` | `s16` | ASR 分片输出采样格式/位深，例如 `s16`、`s24`、`s32`、`f32` |
 | `--output-format` | `ogg` | ASR 分片输出容器，例如 `ogg`、`wav`、`flac`、`aac`、`m4a` |
 | `--output-codec` | `libopus` | ASR 分片输出编码器，例如 `libopus`、`pcm_s16le`、`pcm_s24le`、`pcm_s32le`、`pcm_f32le`、`flac`、`aac` |
@@ -398,7 +398,10 @@ go build -tags libav -trimpath \
 
 ```text
 输入音频 -> WAV -> 固定切片并发静音裁剪 -> 合并 WAV -> ASR 分片
+split：输入音频 -> WAV -> ASR 分片
 ```
+
+`split` 会在静音检测前始终将输入统一转为中间 WAV。最终 ASR 分片的容器、编码器、码率、采样率和采样格式仍由对应输出参数控制。
 
 ### 单步处理
 
@@ -415,7 +418,7 @@ go build -tags libav -trimpath \
 ```
 
 ```bash
-./smartaudio --mode split --input /tmp/input_merged.wav --out-dir /tmp/segments
+./smartaudio --mode split --input /tmp/input.mp3 --out-dir /tmp/segments
 ```
 
 ### CLI 输出
