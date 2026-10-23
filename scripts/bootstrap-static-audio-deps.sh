@@ -6,7 +6,7 @@ THIRD_PARTY_DIR="${THIRD_PARTY_DIR:-$ROOT_DIR/third_party}"
 SRC_DIR="${SRC_DIR:-$THIRD_PARTY_DIR/src}"
 PREFIX="${PREFIX:-$THIRD_PARTY_DIR/ffmpeg-audio}"
 
-FFMPEG_VERSION="${FFMPEG_VERSION:-8.1.2}"
+FFMPEG_VERSION="${FFMPEG_VERSION:-8.1.3}"
 OPUS_VERSION="${OPUS_VERSION:-1.5.2}"
 
 FFMPEG_ARCHIVE_EXT="${FFMPEG_ARCHIVE_EXT:-tar.gz}"
@@ -15,8 +15,8 @@ FFMPEG_SIG_URL="${FFMPEG_SIG_URL:-$FFMPEG_URL.asc}"
 FFMPEG_PGP_KEY_URL="${FFMPEG_PGP_KEY_URL:-https://ffmpeg.org/ffmpeg-devel.asc}"
 FFMPEG_PGP_FINGERPRINT="${FFMPEG_PGP_FINGERPRINT:-FCF986EA15E6E293A5644F10B4322F04D67658D8}"
 OPUS_URL="${OPUS_URL:-https://downloads.xiph.org/releases/opus/opus-$OPUS_VERSION.tar.gz}"
-FFMPEG_SHA256="${FFMPEG_SHA256:-}"
-OPUS_SHA256="${OPUS_SHA256:-}"
+FFMPEG_SHA256="${FFMPEG_SHA256:-bd458826a039b48a9606e794554c75eb4c4984b84173f7afa3128eae89336f2b}"
+OPUS_SHA256="${OPUS_SHA256:-65c1d2f78b9f2fb20082c38cbe47c951ad5839345876e46941612ee87f9a7ce1}"
 
 JOBS="${JOBS:-$(getconf _NPROCESSORS_ONLN)}"
 CC="${CC:-cc}"
@@ -164,6 +164,7 @@ build_ffmpeg() {
     extract_archive "$archive" "$SRC_DIR"
     touch "$source_dir/.extract-ok"
   fi
+  "$ROOT_DIR/scripts/apply-ffmpeg-security-patches.sh" "$source_dir"
   cd "$source_dir"
   if ! PKG_CONFIG_PATH="$PREFIX/lib/pkgconfig" ./configure \
     --prefix="$PREFIX" \
@@ -241,6 +242,7 @@ build_ffmpeg() {
     exit 1
   fi
   make -j"$JOBS"
+  make -j"$JOBS" fate-encryption-info
   make install
 }
 

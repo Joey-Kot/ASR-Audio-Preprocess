@@ -2,13 +2,22 @@
 set -eu
 
 ROOT_DIR="$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)"
-FFMPEG_DIR="${FFMPEG_DIR:-$ROOT_DIR/third_party/src/ffmpeg}"
+FFMPEG_DIR="${FFMPEG_DIR:-$ROOT_DIR/third_party/src/ffmpeg-8.1.3}"
 PREFIX="${PREFIX:-$ROOT_DIR/third_party/ffmpeg-audio}"
+CC="${CC:-cc}"
+PKG_CONFIG_BIN="${PKG_CONFIG_BIN:-pkg-config}"
 
+"$ROOT_DIR/scripts/apply-ffmpeg-security-patches.sh" "$FFMPEG_DIR"
 cd "$FFMPEG_DIR"
+export PKG_CONFIG_PATH="$PREFIX/lib/pkgconfig"
 
 ./configure \
   --prefix="$PREFIX" \
+  --cc="$CC" \
+  --pkg-config="$PKG_CONFIG_BIN" \
+  --pkg-config-flags=--static \
+  --extra-cflags="-I$PREFIX/include" \
+  --extra-ldflags="-L$PREFIX/lib" \
   --enable-static \
   --disable-shared \
   --disable-programs \
@@ -75,4 +84,5 @@ cd "$FFMPEG_DIR"
   --enable-filter=anull
 
 make -j"${JOBS:-$(getconf _NPROCESSORS_ONLN)}"
+make -j"${JOBS:-$(getconf _NPROCESSORS_ONLN)}" fate-encryption-info
 make install
