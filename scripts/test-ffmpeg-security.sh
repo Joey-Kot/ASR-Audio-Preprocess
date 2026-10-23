@@ -4,7 +4,8 @@ ROOT_DIR="$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)"
 PREFIX="${PREFIX:-$ROOT_DIR/third_party/ffmpeg-audio}"
 CC="${CC:-cc}"
 PKG_CONFIG_BIN="${PKG_CONFIG_BIN:-pkg-config}"
-export PKG_CONFIG_PATH="${PKG_CONFIG_PATH:-$PREFIX/lib/pkgconfig}"
+# Prefer the local build even when MSYS2 or the caller already sets a search path.
+export PKG_CONFIG_PATH="$PREFIX/lib/pkgconfig${PKG_CONFIG_PATH:+:$PKG_CONFIG_PATH}"
 test_dir="$(mktemp -d "${TMPDIR:-/tmp}/smartaudio-pssh.XXXXXXXX")"
 trap 'rm -rf "$test_dir"' EXIT HUP INT TERM
 # Intentional splitting of pkg-config compiler/linker flags.
