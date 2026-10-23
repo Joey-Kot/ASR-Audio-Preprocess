@@ -341,12 +341,7 @@ export PKG_CONFIG="pkg-config --static"
 Go `1.27.3` is required. The script uses the official FFmpeg `8.1.3` release.
 It verifies the FFmpeg release PGP-key fingerprint, archive signature and
 SHA-256; the Opus archive is also verified with SHA-256.
-The build requires `patch` and applies the vendored PR 24593 backport for
-`CVE-2026-107678`, including the upstream encryption-info test and a long-list
-regression. Both build entry points apply the patch and run `fate-encryption-info`.
-After building, `./scripts/test-ffmpeg-security.sh` checks MOV `pssh` handling.
-Source or patch mismatches stop the build. See the
-[security audit](docs/security-audit-2026-10-23.md) for scope and findings.
+The build requires `patch`.
 
 The FFmpeg build retains only required audio components: `libavcodec`, `libavformat`, `libavfilter`, `libswresample`, common audio formats, required audio filters, and `libopus`, PCM, FLAC, and AAC encoders. Programs, documentation, networking, autodetection, video, subtitles, and unrelated components are disabled.
 
