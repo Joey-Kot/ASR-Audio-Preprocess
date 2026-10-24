@@ -115,8 +115,10 @@ func TestLibavSplitUsesConfiguredOutputAudio(t *testing.T) {
 	}{
 		{name: "wav", format: "wav", codec: "pcm_s16le", extension: ".wav"},
 		{name: "wav_s24", format: "wav", codec: "pcm_s24le", sampleFmt: "s24", extension: ".wav"},
+		{name: "wav_f32", format: "wav", codec: "pcm_f32le", sampleFmt: "f32", extension: ".wav"},
 		{name: "flac", format: "flac", codec: "flac", extension: ".flac"},
 		{name: "aac", format: "adts", codec: "aac", bitrate: "64k", extension: ".aac"},
+		{name: "aac_s16_fallback", format: "adts", codec: "aac", bitrate: "64k", sampleFmt: "s16", extension: ".aac"},
 		{name: "m4a", format: "mp4", codec: "aac", bitrate: "64k", extension: ".m4a"},
 	}
 	for _, tc := range cases {

@@ -5,14 +5,12 @@ their complete license texts in `THIRD_PARTY_LICENSES/`.
 
 ## FFmpeg
 
-- Version: 8.1.3
+- Version: 9.0.2
 - Source: https://ffmpeg.org/
 - License: LGPL-2.1-or-later for the distributed build. The build scripts do
   not enable `--enable-gpl`, `--enable-version3`, or `--enable-nonfree`.
 - Full license text: `THIRD_PARTY_LICENSES/FFmpeg-LGPL-2.1-or-later.txt`
 - Build configuration: `scripts/bootstrap-static-audio-deps.sh`
-- Local changes: `scripts/patches/ffmpeg-8.1.3-cve-2026-107678.patch`,
-  backporting upstream PR 24593 and adding a long-list regression test.
 
 ## Opus
 

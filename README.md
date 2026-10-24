@@ -338,10 +338,9 @@ export PKG_CONFIG_PATH="$PWD/third_party/ffmpeg-audio/lib/pkgconfig"
 export PKG_CONFIG="pkg-config --static"
 ```
 
-Go `1.27.3` is required. The script uses the official FFmpeg `8.1.3` release.
+Go `1.27.3` is required. The script uses the official FFmpeg `9.0.2` release.
 It verifies the FFmpeg release PGP-key fingerprint, archive signature and
 SHA-256; the Opus archive is also verified with SHA-256.
-The build requires `patch`.
 
 The FFmpeg build retains only required audio components: `libavcodec`, `libavformat`, `libavfilter`, `libswresample`, common audio formats, required audio filters, and `libopus`, PCM, FLAC, and AAC encoders. Programs, documentation, networking, autodetection, video, subtitles, and unrelated components are disabled.
 

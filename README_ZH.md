@@ -487,15 +487,14 @@ export PKG_CONFIG_PATH="$PWD/third_party/ffmpeg-audio/lib/pkgconfig"
 export PKG_CONFIG="pkg-config --static"
 ```
 
-默认 FFmpeg 源码为官方稳定版 `8.1.3`：
+默认 FFmpeg 源码为官方稳定版 `9.0.2`：
 
 ```text
-https://www.ffmpeg.org/releases/ffmpeg-8.1.3.tar.gz
+https://www.ffmpeg.org/releases/ffmpeg-9.0.2.tar.gz
 ```
 
 Go 版本要求为 `1.27.3`。脚本会校验 FFmpeg 源码包的 SHA-256，并下载对应的
 `.asc` 签名和发布公钥，核对公钥指纹后验证签名。Opus 源码包也会校验 SHA-256。
-构建需要 `patch`。
 
 FFmpeg 配置只保留音频处理所需能力，禁用了程序、文档、网络、自动探测、视频、字幕和无关组件。当前保留的核心能力包括：
 

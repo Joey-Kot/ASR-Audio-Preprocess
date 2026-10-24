@@ -2,6 +2,10 @@
 
 Baseline: `72922741cf434050545ccc31dd17151cc8f79dcc`.
 
+This is a historical audit of the 2026-10-23 build. Current builds use
+unmodified FFmpeg 9.0.2; the local backport, application script and
+patch-specific checks described below have been removed.
+
 ## Result and updates
 
 The enabled MOV demuxer exposes **CVE-2026-107678** when opening a crafted

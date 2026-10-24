@@ -724,11 +724,11 @@ static enum AVSampleFormat sa_sample_fmt_from_name(const char *sample_format) {
     return fmt;
 }
 
-static int sa_encoder_supports_sample_fmt(const AVCodec *encoder, enum AVSampleFormat sample_fmt) {
+static int sa_encoder_supports_sample_fmt(const enum AVSampleFormat *formats, int format_count, enum AVSampleFormat sample_fmt) {
     if (sample_fmt == AV_SAMPLE_FMT_NONE) return 0;
-    if (!encoder->sample_fmts) return 1;
-    for (const enum AVSampleFormat *fmt = encoder->sample_fmts; *fmt != AV_SAMPLE_FMT_NONE; fmt++) {
-        if (*fmt == sample_fmt) return 1;
+    if (!formats) return 1;
+    for (int i = 0; i < format_count; i++) {
+        if (formats[i] == sample_fmt) return 1;
     }
     return 0;
 }
@@ -772,11 +772,19 @@ static int sa_open_audio_output_with_threads(const char *out_path, const char *f
         return AVERROR(ENOMEM);
     }
     out->enc->sample_rate = sample_rate > 0 ? sample_rate : 16000;
+    const enum AVSampleFormat *sample_fmts = NULL;
+    int sample_fmt_count = 0;
+    ret = avcodec_get_supported_config(out->enc, encoder, AV_CODEC_CONFIG_SAMPLE_FORMAT,
+                                       0, (const void **)&sample_fmts, &sample_fmt_count);
+    if (ret < 0) {
+        sa_set_av_error("avcodec_get_supported_config(sample format)", ret);
+        return ret;
+    }
     enum AVSampleFormat requested_sample_fmt = sa_sample_fmt_from_name(sample_format);
-    if (requested_sample_fmt != AV_SAMPLE_FMT_NONE && sa_encoder_supports_sample_fmt(encoder, requested_sample_fmt)) {
+    if (requested_sample_fmt != AV_SAMPLE_FMT_NONE && sa_encoder_supports_sample_fmt(sample_fmts, sample_fmt_count, requested_sample_fmt)) {
         out->enc->sample_fmt = requested_sample_fmt;
     } else {
-        out->enc->sample_fmt = encoder->sample_fmts ? encoder->sample_fmts[0] : AV_SAMPLE_FMT_S16;
+        out->enc->sample_fmt = sample_fmts ? sample_fmts[0] : AV_SAMPLE_FMT_S16;
     }
     av_channel_layout_default(&out->enc->ch_layout, 1);
     out->enc->time_base = (AVRational){1, out->enc->sample_rate};
